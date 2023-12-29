@@ -1,0 +1,46 @@
+version: '3'
+services:
+
+
+    # we define the volumes centralized so we can reuse them in different services
+    appvolumes:
+        image: busybox:latest
+        tty: true
+        volumes: &appvolumes
+            # php container specific mounts
+            - www_data:/var/www/src
+            - ~/.composer:/home/limesoda/.composer:cached
+            - ~/.ssh/id_rsa:/home/limesoda/.ssh/id_rsa
+            - ~/.ssh/id_rsa.pub:/home/limesoda/.ssh/id_rsa.pub
+            - ~/.ssh/id_rsa.pub:/home/limesoda/.ssh/authorized_keys
+            - ~/.ssh/id_rsa.pub:/home/limesoda/.ssh/authorized_keys2
+            - ~/.ssh/known_hosts:/home/limesoda/.ssh/known_hosts
+            - ./config/docker/scripts:/scripts
+            - ./config/docker/php/www.conf:/etc/php/${PHP_VERSION}/fpm/pool.d/www.conf:ro
+            - ./config/docker/php/php.ini:/etc/php/${PHP_VERSION}/fpm/conf.d/php.ini:ro
+            - ./config/docker/php/xdebug-cli.ini:/etc/php/${PHP_VERSION}/cli/conf.d/20-xdebug.ini:ro
+            - ./config/docker/php/xdebug-fpm.ini:/etc/php/${PHP_VERSION}/fpm/conf.d/xdebug.ini:ro
+            - ./config/docker/php/memory_limit-cli.ini:/etc/php/${PHP_VERSION}/cli/conf.d/memory_limit.ini:ro
+            - ./config/docker/php/error_log-cli.ini:/etc/php/${PHP_VERSION}/cli/conf.d/error_log.ini:ro
+            - ./src:/var/www/src
+
+    php:
+        image: limesoda/php-fpm:${PHP_VERSION}
+        volumes: *appvolumes
+        env_file:
+            - .env
+            - ~/.docker.properties
+        depends_on:
+            - appvolumes
+        working_dir: /var/www/src
+        hostname: dev-php
+        networks:
+            internal:
+        # if you want to have a clean container name (shown in "docker ps"), replace <CUSTOMER_NAME> and uncomment the following line
+        # container_name: <CUSTOMER_NAME>_php
+
+volumes:
+    www_data:
+
+networks:
+    internal:

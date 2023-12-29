@@ -1,0 +1,43 @@
+{
+  "name": "thomasnegeli/dydx2koinly",
+  "description": "Convert dYdX exported files to koinly readable",
+  "type": "project",
+  "require": {
+    "symfony/console": "^7.0.1"
+  },
+  "require-dev": {
+    "phpcompatibility/php-compatibility": "^9.3.5"
+  },
+  "license": "GNU GENERAL PUBLIC LICENSE",
+  "autoload": {
+    "psr-4": {
+      "Thomasnegeli\\Dydx2koinly\\": "src/"
+    }
+  },
+  "authors": [
+    {
+      "name": "Thomas Negeli"
+    }
+  ],
+  "scripts": {
+    "post-install-cmd": [
+      "([ $COMPOSER_DEV_MODE -eq 0 ] || vendor/bin/phpcs --config-set installed_paths vendor/phpcompatibility/php-compatibility)"
+    ],
+    "post-update-cmd": [
+      "([ $COMPOSER_DEV_MODE -eq 0 ] || vendor/bin/phpcs --config-set installed_paths vendor/phpcompatibility/php-compatibility)"
+    ],
+    "test-php-compatibility": [
+      "cd /var/www/src && php vendor/bin/phpcs --standard=PHPCompatibility --runtime-set testVersion 8.3 --ignore=vendor -np ."
+    ]
+  },
+  "minimum-stability": "stable",
+  "config": {
+    "preferred-install": "dist",
+    "sort-packages": true,
+    "platform": {
+      "php": "8.3.0"
+    },
+    "process-timeout": 3000,
+    "notify-on-install": false
+  }
+}
