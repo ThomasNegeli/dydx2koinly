@@ -23,10 +23,31 @@ use Symfony\Component\Console\SingleCommandApplication;
 
         $transfers = $input->getArgument('transfers');
         $transfers = readCsv($transfers);
-        
+
+        $positions = generatePositions($trades, $funding);
+
+        writeCsv('./output/positions.csv', $positions);
+
         return 0;
     })
     ->run();
+
+function writeCsv($file, $positions)
+{
+    $fp = @fopen($file, "w");
+    $headings = array(
+        'Koinly Date',
+        'Amount',
+        'Currency',
+        'Label',
+        'TxHash'
+    );
+    fputcsv($fp, $headings);
+    foreach ($positions as $position) {
+        fputcsv($fp, $position);
+    }
+    fclose($fp);
+}
 
 function readCsv($file): array
 {
@@ -56,4 +77,45 @@ function readCsv($file): array
         fclose($fp);
     }
     return $lines;
+}
+
+function generatePositions($trades, $funding)
+{
+    $positions = array();
+    $realizedGains = array();
+    $marginFee = array();
+    $trades = array_reverse($trades);
+    $funding = array_reverse($funding);
+    foreach ($trades as $trade) {
+        $market = $trade['market'];
+        $side = $trade['side'];
+        if (!isset($positions[$market])) {
+            $positions[$market] = array(
+                'size' => 0,
+                'fee' => 0,
+                'initial_amount' => $trade['size'] * $trade['price'],
+                'total_amount' => $trade['size'] * $trade['price'],
+            );
+        }
+        if ($side == 'BUY') {
+            $positions[$market]['size'] += $trade['size'];
+            $positions[$market]['total_amount'] += $trade['size'] * $trade['price'];
+            $positions[$market]['fee'] += $trade['fee'];
+        } else {
+            $positions[$market]['size'] -= $trade['size'];
+            $positions[$market]['total_amount'] -= $trade['size'] * $trade['price'];
+            $positions[$market]['fee'] += $trade['fee'];
+        }
+
+        if ($positions[$market]['size'] == 0) {
+            $realizedGains[$trade['createdAt']] = array(
+                'date' => $trade['createdAt'],
+                'amount' => $positions[$market]['total_amount'] - $positions[$market]['initial_amount'],
+                'currency' => 'USDC',
+                'label' => 'realized gain',
+                'tx_hash' => ''
+            );
+        }
+    }
+    return $realizedGains;
 }
