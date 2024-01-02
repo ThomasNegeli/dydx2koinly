@@ -15,24 +15,29 @@ use Symfony\Component\Console\SingleCommandApplication;
     ->addArgument('transfers', InputArgument::REQUIRED, 'The dYdX transfers export file!')
     ->setCode(function (InputInterface $input, OutputInterface $output): int {
 
+
         $trades = $input->getArgument('trades');
-        $trades = readCsv($trades);
+        $trades = read($trades);
 
         $funding = $input->getArgument('funding');
-        $funding = readCsv($funding);
+        $funding = read($funding);
 
         $transfers = $input->getArgument('transfers');
-        $transfers = readCsv($transfers);
+        $transfers = read($transfers);
 
-        $positions = generatePositions($trades, $funding);
+        $positions = generatePositions($trades);
+        $funding = generateFunding($funding);
+        $transfers = generateTransfers($transfers);
 
-        writeCsv('./output/positions.csv', $positions);
+        write('./output/positions.csv', $positions);
+        write('./output/funding.csv', $funding);
+        write('./output/transfers.csv', $transfers);
 
         return 0;
     })
     ->run();
 
-function writeCsv($file, $positions)
+function write($file, $positions)
 {
     $fp = @fopen($file, "w");
     $headings = array(
@@ -49,7 +54,7 @@ function writeCsv($file, $positions)
     fclose($fp);
 }
 
-function readCsv($file): array
+function read($file): array
 {
     $fp = @fopen($file, "r");
     $lines = array();
@@ -79,43 +84,87 @@ function readCsv($file): array
     return $lines;
 }
 
-function generatePositions($trades, $funding)
+function generateFunding($funding): array
 {
-    $positions = array();
+    $payments = array();
+    $funding = array_reverse($funding);
+    foreach ($funding as $paymentIndex => $payment) {
+        $date = date_create($payment['effectiveAt']);
+        $date = $date->format('Y-m-t');
+
+        if (!isset($payments[$date])) {
+            $payments[$date]['date'] = $date;
+            $payments[$date]['amount'] = floatval($payment['payment']);
+            $payments[$date]['currency'] = 'USDC';
+            $payments[$date]['label'] = 'realized gain';
+        } else {
+            $payments[$date]['amount'] += floatval($payment['payment']);
+        }
+    }
+
+    return $payments;
+}
+
+function generatePositions($trades): array
+{
     $realizedGains = array();
+    $positions = array();
     $marginFee = array();
     $trades = array_reverse($trades);
-    $funding = array_reverse($funding);
-    foreach ($trades as $trade) {
+    foreach ($trades as $tradeIndex => $trade) {
         $market = $trade['market'];
         $side = $trade['side'];
+        $scaleTrade = false;
         if (!isset($positions[$market])) {
             $positions[$market] = array(
+                'direction' => $trade['side'] == "BUY" ? "long" : "short",
                 'size' => 0,
-                'fee' => 0,
-                'initial_amount' => $trade['size'] * $trade['price'],
-                'total_amount' => $trade['size'] * $trade['price'],
+                'avg_entry' => floatval($trade['price']),
+                'entry' => $trade,
+                'exit' => null,
+                'scale' => null,
             );
+        } else {
+            $scaleTrade = true;
         }
         if ($side == 'BUY') {
             $positions[$market]['size'] += $trade['size'];
-            $positions[$market]['total_amount'] += $trade['size'] * $trade['price'];
-            $positions[$market]['fee'] += $trade['fee'];
         } else {
             $positions[$market]['size'] -= $trade['size'];
-            $positions[$market]['total_amount'] -= $trade['size'] * $trade['price'];
-            $positions[$market]['fee'] += $trade['fee'];
         }
 
+        $positions[$market]['size'] = round($positions[$market]['size'], 4);
+
         if ($positions[$market]['size'] == 0) {
-            $realizedGains[$trade['createdAt']] = array(
-                'date' => $trade['createdAt'],
-                'amount' => $positions[$market]['total_amount'] - $positions[$market]['initial_amount'],
-                'currency' => 'USDC',
-                'label' => 'realized gain',
-                'tx_hash' => ''
-            );
+            $positions[$market]['exit'] = $trade;
+            $date = date_create($positions[$market]['exit']['createdAt']);
+            $date = $date->format('Y-m-d');
+            $realizedGains[$market][$date] = $positions[$market];
+            $scaleTrade = false;
+            unset($positions[$market]);
+        }
+
+        if ($scaleTrade) {
+            $positions[$market]['scale'][] = $trade;
         }
     }
     return $realizedGains;
+}
+
+function generateTransfers($transfers): array
+{
+    $positions = array();
+    $transfers = array_reverse($transfers);
+    foreach ($transfers as $transfer) {
+        $date = $transfer['createdAt'];
+        $amount = $transfer['type'] == 'DEPOSIT' ? floatval($transfer['creditAmount']) : -1 * floatval($transfer['creditAmount']);
+        $positions[$date] = array(
+            'date' => $date,
+            'amount' => $amount,
+            'currency' => 'USDC',
+            'label' => ''
+        );
+    }
+
+    return $positions;
 }
