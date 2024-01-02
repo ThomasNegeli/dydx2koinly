@@ -118,6 +118,7 @@ function generatePositions($trades): array
         if (!isset($positions[$market])) {
             $positions[$market] = array(
                 'direction' => $trade['side'] == "BUY" ? "long" : "short",
+                'fee' => 0,
                 'size' => 0,
                 'avg_entry' => floatval($trade['price']),
                 'entry' => $trade,
@@ -133,6 +134,7 @@ function generatePositions($trades): array
             $positions[$market]['size'] -= $trade['size'];
         }
 
+        $positions[$market]['fee'] += floatval($trade['fee']);
         $positions[$market]['size'] = round($positions[$market]['size'], 4);
 
         if ($positions[$market]['size'] == 0) {
@@ -148,6 +150,57 @@ function generatePositions($trades): array
             $positions[$market]['scale'][] = $trade;
         }
     }
+    foreach ($realizedGains as $market => $marketGains) {
+        foreach ($marketGains as $tradeDate => $trade) {
+            if ($trade['scale'] == null) {
+
+                // just a simple trade, no scaling
+
+                $totalBought = floatval($trade['entry']['price']) * floatval($trade['entry']['size']);
+                $totalSold = floatval($trade['exit']['price']) * floatval($trade['exit']['size']);
+
+                if ($trade['direction'] == "long") {
+                    $profit = $totalBought - $totalSold;
+                } else {
+                    $profit = $totalSold - $totalBought;
+                }
+
+                $trade['profit'] = $profit;
+            } else {
+                $profit = 0;
+                if ($trade['direction'] == "long") {
+                    $totalBought = floatval($trade['entry']['price']) * floatval($trade['entry']['size']);
+                    $totalSold = 0;
+                    foreach ($trade['scale'] as $scaleTrade) {
+                        if ($scaleTrade['side'] == "SELL") {
+                            $totalSold += floatval($scaleTrade['price']) * floatval($scaleTrade['size']);
+                        } else {
+                            $totalBought += floatval($scaleTrade['price']) * floatval($scaleTrade['size']);
+                        }
+                    }
+                    $totalSold += floatval($trade['exit']['price']) * floatval($trade['exit']['size']);
+                    $profit = $totalBought - $totalSold;
+                } else {
+                    $totalSold = floatval($trade['entry']['price']) * floatval($trade['entry']['size']);
+                    $totalBought = 0;
+                    foreach ($trade['scale'] as $scaleTrade) {
+                        if ($scaleTrade['side'] == "SELL") {
+                            $totalSold += floatval($scaleTrade['price']) * floatval($scaleTrade['size']);
+                        } else {
+                            $totalBought += floatval($scaleTrade['price']) * floatval($scaleTrade['size']);
+                        }
+                    }
+                    $totalBought += floatval($trade['exit']['price']) * floatval($trade['exit']['size']);
+                    $profit = $totalSold - $totalBought;
+                }
+                
+                $trade['profit'] = $profit;
+            }
+
+            $realizedGains[$market][$tradeDate] = $trade;
+        }
+    }
+
     return $realizedGains;
 }
 
