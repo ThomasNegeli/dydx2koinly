@@ -112,6 +112,10 @@ function generatePositions($trades): array
     $marginFee = array();
     $trades = array_reverse($trades);
     foreach ($trades as $tradeIndex => $trade) {
+        $trade['size'] = floatval($trade['size']);
+        $trade['price'] = floatval($trade['price']);
+        $trade['fee'] = floatval($trade['fee']);
+
         $market = $trade['market'];
         $side = $trade['side'];
         $scaleTrade = false;
@@ -129,9 +133,20 @@ function generatePositions($trades): array
             $scaleTrade = true;
         }
         if ($side == 'BUY') {
-            $positions[$market]['size'] += $trade['size'];
+
+            if ($positions[$market]['direction'] == "short" && ($positions[$market]['size'] + $trade['size']) > 0) {
+                // a buy on the short side kann flip trade direction
+                $positions[$market]['size'] += $trade['size'];
+            } else {
+                $positions[$market]['size'] += $trade['size'];
+            }
         } else {
-            $positions[$market]['size'] -= $trade['size'];
+            if ($positions[$market]['direction'] == "long" && ($positions[$market]['size'] - $trade['size']) < 0) {
+                // a sell on the long side kann flip trade direction
+                $positions[$market]['size'] -= $trade['size'];
+            } else {
+                $positions[$market]['size'] -= $trade['size'];
+            }
         }
 
         $positions[$market]['fee'] += floatval($trade['fee']);
@@ -140,7 +155,7 @@ function generatePositions($trades): array
         if ($positions[$market]['size'] == 0) {
             $positions[$market]['exit'] = $trade;
             $date = date_create($positions[$market]['exit']['createdAt']);
-            $date = $date->format('Y-m-d');
+            $date = $date->format('Y-m-d_H-i-s');
             $realizedGains[$market][$date] = $positions[$market];
             $scaleTrade = false;
             unset($positions[$market]);
@@ -193,15 +208,33 @@ function generatePositions($trades): array
                     $totalBought += floatval($trade['exit']['price']) * floatval($trade['exit']['size']);
                     $profit = $totalSold - $totalBought;
                 }
-                
-                $trade['profit'] = $profit;
-            }
 
+                $trade['profit'] = round($profit, 4);
+            }
+            // TODO 24.7
+            // TODO 9.8
+            // TODO 13.11
+            // TODO alle Fees berücksichtigen
             $realizedGains[$market][$tradeDate] = $trade;
         }
     }
 
-    return $realizedGains;
+    $lines = array();
+    foreach ($realizedGains as $market => $positions) {
+        foreach ($positions as $tradeDate => $trade) {
+
+            if (!isset($lines[$tradeDate])) {
+                $lines[$tradeDate]['date'] = $tradeDate;
+                $lines[$tradeDate]['amount'] = 0;
+                $lines[$tradeDate]['currency'] = 'USDC';
+                $lines[$tradeDate]['label'] = 'realized gain';
+            }
+
+            $lines[$tradeDate]['amount'] += floatval($trade['profit']);
+        }
+    }
+
+    return $lines;
 }
 
 function generateTransfers($transfers): array
