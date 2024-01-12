@@ -90,7 +90,9 @@ function generateFunding($funding): array
     $funding = array_reverse($funding);
     foreach ($funding as $paymentIndex => $payment) {
         $date = date_create($payment['effectiveAt']);
-        $date = $date->format('Y-m-t');
+        $date->setTime(23, 59, 59);
+        //$date = $date->format('Y-m-t');
+        $date = $date->format('Y-m-d H:i:s');
 
         if (!isset($payments[$date])) {
             $payments[$date]['date'] = $date;
@@ -109,132 +111,164 @@ function generatePositions($trades): array
 {
     $realizedGains = array();
     $positions = array();
-    $marginFee = array();
     $trades = array_reverse($trades);
     foreach ($trades as $tradeIndex => $trade) {
-        $trade['size'] = floatval($trade['size']);
-        $trade['price'] = floatval($trade['price']);
-        $trade['fee'] = floatval($trade['fee']);
+        $trade['size'] = round(floatval($trade['size']), 4);
+        $trade['price'] = round(floatval($trade['price']), 4);
+        $trade['fee'] = round(floatval($trade['fee']), 4);
 
         $market = $trade['market'];
-        $side = $trade['side'];
-        $scaleTrade = false;
         if (!isset($positions[$market])) {
-            $positions[$market] = array(
-                'direction' => $trade['side'] == "BUY" ? "long" : "short",
-                'fee' => 0,
-                'size' => 0,
-                'avg_entry' => floatval($trade['price']),
-                'entry' => $trade,
-                'exit' => null,
-                'scale' => null,
-            );
+            $positions[$market]['direction'] = $trade['side'] == 'BUY' ? 1 : -1;
+            $positions[$market]['size'] = $trade['size'] * $positions[$market]['direction'];
+            $positions[$market]['amount'] = $positions[$market]['size'] * $trade['price'];
+            $positions[$market]['average_entry_price'] = $trade['price'];
+            $positions[$market]['fee'] = $trade['fee'] * -1;
+            $positions[$market]['entry_date'] = $trade['createdAt'];
+            $positions[$market]['profit'] = 0;
+            $positions[$market]['market'] = $market;
         } else {
-            $scaleTrade = true;
-        }
-        if ($side == 'BUY') {
-
-            if ($positions[$market]['direction'] == "short" && ($positions[$market]['size'] + $trade['size']) > 0) {
-                // a buy on the short side kann flip trade direction
-                $positions[$market]['size'] += $trade['size'];
-            } else {
-                $positions[$market]['size'] += $trade['size'];
-            }
-        } else {
-            if ($positions[$market]['direction'] == "long" && ($positions[$market]['size'] - $trade['size']) < 0) {
-                // a sell on the long side kann flip trade direction
-                $positions[$market]['size'] -= $trade['size'];
-            } else {
-                $positions[$market]['size'] -= $trade['size'];
-            }
-        }
-
-        $positions[$market]['fee'] += floatval($trade['fee']);
-        $positions[$market]['size'] = round($positions[$market]['size'], 4);
-
-        if ($positions[$market]['size'] == 0) {
-            $positions[$market]['exit'] = $trade;
-            $date = date_create($positions[$market]['exit']['createdAt']);
-            $date = $date->format('Y-m-d_H-i-s');
-            $realizedGains[$market][$date] = $positions[$market];
-            $scaleTrade = false;
-            unset($positions[$market]);
-        }
-
-        if ($scaleTrade) {
-            $positions[$market]['scale'][] = $trade;
-        }
-    }
-    foreach ($realizedGains as $market => $marketGains) {
-        foreach ($marketGains as $tradeDate => $trade) {
-            if ($trade['scale'] == null) {
-
-                // just a simple trade, no scaling
-
-                $totalBought = floatval($trade['entry']['price']) * floatval($trade['entry']['size']);
-                $totalSold = floatval($trade['exit']['price']) * floatval($trade['exit']['size']);
-
-                if ($trade['direction'] == "long") {
-                    $profit = $totalBought - $totalSold;
+            $positions[$market]['size'] = round($positions[$market]['size'], 4);
+            $positions[$market]['amount'] = round($positions[$market]['amount'], 4);
+            $positions[$market]['fee'] -= $trade['fee'];
+            if ($positions[$market]['direction'] == 1) {
+                // handling long positions
+                if ($trade['side'] == 'BUY') {
+                    // buy in an existing long trade
+                    $amountBought = $trade['size'] * $trade['price'];
+                    $positions[$market]['amount'] += $amountBought;
+                    $positions[$market]['size'] += $trade['size'];
+                    $positions[$market]['average_entry_price'] = $positions[$market]['amount'] / $positions[$market]['size'];
                 } else {
-                    $profit = $totalSold - $totalBought;
-                }
-
-                $trade['profit'] = $profit;
-            } else {
-                $profit = 0;
-                if ($trade['direction'] == "long") {
-                    $totalBought = floatval($trade['entry']['price']) * floatval($trade['entry']['size']);
-                    $totalSold = 0;
-                    foreach ($trade['scale'] as $scaleTrade) {
-                        if ($scaleTrade['side'] == "SELL") {
-                            $totalSold += floatval($scaleTrade['price']) * floatval($scaleTrade['size']);
+                    // sell in a long trade
+                    if ($positions[$market]['size'] - $trade['size'] == 0) {
+                        // closing a long position here
+                        $amountBought = $trade['size'] * $trade['price'];
+                        $positions[$market]['profit'] = $amountBought - $positions[$market]['amount'];
+                        $positions[$market]['exit_date'] = $trade['createdAt'];
+                        $realizedGains[$positions[$market]['exit_date']] = $positions[$market];
+                        unset($positions[$market]);
+                    } else {
+                        if ($positions[$market]['size'] - $trade['size'] > 0) {
+                            // partial profit taking
+                            $amountAtAverageEntry = $trade['size'] * $positions[$market]['average_entry_price'];
+                            $amountSold = $trade['size'] * $trade['price'];
+                            $profit = $amountSold - $amountAtAverageEntry;
+                            $positions[$market]['profit'] += $profit;
+                            $positions[$market]['size'] -= $trade['size'];
+                            $positions[$market]['amount'] -= $amountSold;
                         } else {
-                            $totalBought += floatval($scaleTrade['price']) * floatval($scaleTrade['size']);
+                            // flipping long into a short trade
+
+                            // close the existing long position
+                            $amountSoldToCloseLong = abs($positions[$market]['size']) * $trade['price'];
+                            $positions[$market]['profit'] = $positions[$market]['amount'] - $amountSoldToCloseLong;
+                            $positions[$market]['exit_date'] = $trade['createdAt'];
+                            $realizedGains[$positions[$market]['exit_date']] = $positions[$market];
+
+                            // open up a fresh short position
+                            $trade['size'] = abs($positions[$market]['size'] - $trade['size']);  // calculate the right trade size, becauase we first closed the short
+                            unset($positions[$market]);
+                            $positions[$market]['direction'] = $trade['side'] == 'BUY' ? 1 : -1;
+                            $positions[$market]['size'] = $trade['size'] * $positions[$market]['direction'];
+                            $positions[$market]['amount'] = $positions[$market]['size'] * $trade['price'];
+                            $positions[$market]['average_entry_price'] = $trade['price'];
+                            $positions[$market]['fee'] = $trade['fee'] * -1;
+                            $positions[$market]['entry_date'] = $trade['createdAt'];
+                            $positions[$market]['profit'] = 0;
+                            $positions[$market]['market'] = $market;
                         }
                     }
-                    $totalSold += floatval($trade['exit']['price']) * floatval($trade['exit']['size']);
-                    $profit = $totalBought - $totalSold;
-                } else {
-                    $totalSold = floatval($trade['entry']['price']) * floatval($trade['entry']['size']);
-                    $totalBought = 0;
-                    foreach ($trade['scale'] as $scaleTrade) {
-                        if ($scaleTrade['side'] == "SELL") {
-                            $totalSold += floatval($scaleTrade['price']) * floatval($scaleTrade['size']);
+                }
+            } else {
+                // handling short positions
+                if ($trade['side'] == 'BUY') {
+                    if ($positions[$market]['size'] + $trade['size'] == 0) {
+                        // closing a short position here
+                        $amountBought = $trade['size'] * $trade['price'];
+                        $positions[$market]['profit'] = $positions[$market]['amount'] + $amountBought;
+                        $positions[$market]['exit_date'] = $trade['createdAt'];
+                        $realizedGains[$positions[$market]['exit_date']] = $positions[$market];
+                        unset($positions[$market]);
+                    } else {
+                        if ($positions[$market]['size'] + $trade['size'] < 0) {
+                            // partial profit taking
+                            $amountAtAverageEntry = $trade['size'] * $positions[$market]['average_entry_price'];
+                            $amountBought = $trade['size'] * $trade['price'];
+                            $profit = $amountBought - $amountAtAverageEntry;
+                            $positions[$market]['profit'] += $profit;
+                            $positions[$market]['size'] += $trade['size'];
+                            $positions[$market]['amount'] += $amountBought;
                         } else {
-                            $totalBought += floatval($scaleTrade['price']) * floatval($scaleTrade['size']);
+                            // flipping short into a long trade
+
+                            // close the existing short position
+                            $amountBoughtToCloseShort = abs($positions[$market]['size']) * $trade['price'];
+                            $positions[$market]['profit'] = $positions[$market]['amount'] + $amountBoughtToCloseShort;
+                            $positions[$market]['exit_date'] = $trade['createdAt'];
+                            $realizedGains[$positions[$market]['exit_date']] = $positions[$market];
+
+                            // open up a fresh long position
+                            $trade['size'] = abs($positions[$market]['size'] + $trade['size']);  // calculate the right trade size, becauase we first closed the short
+                            unset($positions[$market]);
+                            $positions[$market]['direction'] = $trade['side'] == 'BUY' ? 1 : -1;
+                            $positions[$market]['size'] = $trade['size'] * $positions[$market]['direction'];
+                            $positions[$market]['amount'] = $positions[$market]['size'] * $trade['price'];
+                            $positions[$market]['average_entry_price'] = $trade['price'];
+                            $positions[$market]['fee'] = $trade['fee'] * -1;
+                            $positions[$market]['entry_date'] = $trade['createdAt'];
+                            $positions[$market]['profit'] = 0;
+                            $positions[$market]['market'] = $market;
                         }
                     }
-                    $totalBought += floatval($trade['exit']['price']) * floatval($trade['exit']['size']);
-                    $profit = $totalSold - $totalBought;
+                } else {
+                    // sell in an existing short trade
+                    $amountSold = $trade['size'] * $trade['price'];
+                    $positions[$market]['amount'] -= $amountSold;
+                    $positions[$market]['size'] -= $trade['size'];
+                    $positions[$market]['average_entry_price'] = $positions[$market]['amount'] / $positions[$market]['size'];
                 }
-
-                $trade['profit'] = round($profit, 4);
             }
-            // TODO 24.7
-            // TODO 9.8
-            // TODO 13.11
-            // TODO alle Fees berücksichtigen
-            $realizedGains[$market][$tradeDate] = $trade;
         }
     }
 
-    $lines = array();
-    foreach ($realizedGains as $market => $positions) {
-        foreach ($positions as $tradeDate => $trade) {
+    $profits = array();
+    $fees = array();
+    foreach ($realizedGains as $tradeDate => $trade) {
 
-            if (!isset($lines[$tradeDate])) {
-                $lines[$tradeDate]['date'] = $tradeDate;
-                $lines[$tradeDate]['amount'] = 0;
-                $lines[$tradeDate]['currency'] = 'USDC';
-                $lines[$tradeDate]['label'] = 'realized gain';
-            }
+        $date = date_create($tradeDate);
+        $date->setTime(23, 59, 59);
+        //$date = $date->format('Y-m-t');
+        $date = $date->format('Y-m-d H:i:s');
 
-            $lines[$tradeDate]['amount'] += floatval($trade['profit']);
+        if (!isset($profits[$date])) {
+            $profits[$date]['date'] = $date;
+            $profits[$date]['amount'] = floatval($trade['profit']);
+            $profits[$date]['currency'] = 'USDC';
+            $profits[$date]['label'] = 'realized gain';
+        } else {
+            $profits[$date]['amount'] += floatval($trade['profit']);
+        }
+
+        if (!isset($fees[$date])) {
+            $fees[$date]['date'] = $date;
+            $fees[$date]['amount'] = floatval($trade['fee']);
+            $fees[$date]['currency'] = 'USDC';
+            $fees[$date]['label'] = 'cost';
+        } else {
+            $fees[$date]['amount'] += floatval($trade['fee']);
         }
     }
 
-    return $lines;
+    $gains = array();
+    foreach ($profits as $profit) {
+        $gains[] = $profit;
+    }
+    foreach ($fees as $fee) {
+        $gains[] = $fee;
+    }
+
+    return $gains;
 }
 
 function generateTransfers($transfers): array
