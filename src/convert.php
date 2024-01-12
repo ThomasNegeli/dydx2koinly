@@ -96,10 +96,10 @@ function generateFunding($funding): array
             $payments[$date]['date'] = $date;
             $payments[$date]['amount'] = floatval($payment['payment']);
             $payments[$date]['currency'] = 'USDC';
-            $payments[$date]['label'] = 'realized gain';
         } else {
             $payments[$date]['amount'] += floatval($payment['payment']);
         }
+        $payments[$date]['label'] = $payments[$date]['amount'] > 0 ? 'realized gain' : 'cost';
     }
 
     return $payments;
