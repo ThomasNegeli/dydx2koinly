@@ -92,7 +92,7 @@ function generateFunding($funding): array
     foreach ($funding as $paymentIndex => $payment) {
         $date = date_create($payment['effectiveAt']);
         $date->setTime(23, 59, 59);
-        //$date = $date->format('Y-m-t');
+        //$date = $date->format('Y-m-t H:i:s');
         $date = $date->format('Y-m-d H:i:s');
 
         $payment = -1 * floatval($payment['rate']) * floatval($payment['positionSize']) * floatval($payment['price']);
@@ -103,9 +103,9 @@ function generateFunding($funding): array
         } else {
             $payments[$date]['amount'] += $payment;
         }
-        $payments[$date]['label'] = $payments[$date]['amount'] > 0 ? 'realized gain' : 'cost';
+        $payments[$date]['label'] = 'realized gain';
         $payments[$date]['transactionHash'] = '';
-        $payments[$date]['description'] = 'Funding';
+        $payments[$date]['description'] = 'Daily funding payment';
     }
 
     return $payments;
