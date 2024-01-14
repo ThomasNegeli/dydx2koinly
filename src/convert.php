@@ -105,7 +105,7 @@ function generateFunding($funding): array
         }
         $payments[$date]['label'] = $payments[$date]['amount'] > 0 ? 'realized gain' : 'cost';
         $payments[$date]['transactionHash'] = '';
-        $payments[$date]['description'] = '';
+        $payments[$date]['description'] = 'Funding';
     }
 
     return $payments;
