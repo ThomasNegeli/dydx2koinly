@@ -25,11 +25,11 @@ use Symfony\Component\Console\SingleCommandApplication;
         $transfers = $input->getArgument('transfers');
         $transfers = read($transfers);
 
-        $positions = generatePositions($trades);
+        $trades = generateTrades($trades);
         $funding = generateFunding($funding);
         $transfers = generateTransfers($transfers);
 
-        write('./output/positions.csv', $positions);
+        write('./output/trades.csv', $trades);
         write('./output/funding.csv', $funding);
         write('./output/transfers.csv', $transfers);
 
@@ -45,7 +45,8 @@ function write($file, $positions)
         'Amount',
         'Currency',
         'Label',
-        'TxHash'
+        'TxHash',
+        'Description'
     );
     fputcsv($fp, $headings);
     foreach ($positions as $position) {
@@ -94,20 +95,25 @@ function generateFunding($funding): array
         //$date = $date->format('Y-m-t');
         $date = $date->format('Y-m-d H:i:s');
 
+        $payment = -1 * floatval($payment['rate']) * floatval($payment['positionSize']) * floatval($payment['price']);
         if (!isset($payments[$date])) {
             $payments[$date]['date'] = $date;
-            $payments[$date]['amount'] = floatval($payment['payment']);
+            $payments[$date]['amount'] = $payment;
             $payments[$date]['currency'] = 'USDC';
         } else {
-            $payments[$date]['amount'] += floatval($payment['payment']);
+            $payments[$date]['amount'] += $payment;
         }
         $payments[$date]['label'] = $payments[$date]['amount'] > 0 ? 'realized gain' : 'cost';
+        $payments[$date]['transactionHash'] = '';
+        $payments[$date]['description'] = '';
     }
 
     return $payments;
 }
 
-function generatePositions($trades): array
+// https://docs.google.com/spreadsheets/d/1jdc52yJ1swpODLTfPaCpFYzsUQ692HwFjje0-IE5fGw/edit#gid=375453467
+
+function generateTrades($trades): array
 {
     $realizedGains = array();
     $positions = array();
@@ -144,7 +150,9 @@ function generatePositions($trades): array
                     if ($positions[$market]['size'] - $trade['size'] == 0) {
                         // closing a long position here
                         $amountBought = $trade['size'] * $trade['price'];
-                        $positions[$market]['profit'] = $amountBought - $positions[$market]['amount'];
+                        $amountAtAverageEntry = $trade['size'] * $positions[$market]['average_entry_price'];
+                        $profit = $amountBought - $amountAtAverageEntry;
+                        $positions[$market]['profit'] += $profit;
                         $positions[$market]['exit_date'] = $trade['createdAt'];
                         $realizedGains[$positions[$market]['exit_date']] = $positions[$market];
                         unset($positions[$market]);
@@ -161,8 +169,10 @@ function generatePositions($trades): array
                             // flipping long into a short trade
 
                             // close the existing long position
-                            $amountSoldToCloseLong = abs($positions[$market]['size']) * $trade['price'];
-                            $positions[$market]['profit'] = $positions[$market]['amount'] - $amountSoldToCloseLong;
+                            $amountAtAverageEntry = $positions[$market]['size'] * $positions[$market]['average_entry_price'];
+                            $amountSoldToCloseLong = $positions[$market]['size'] * $trade['price'];
+                            $profit = $amountAtAverageEntry - $amountSoldToCloseLong;
+                            $positions[$market]['profit'] += $profit;
                             $positions[$market]['exit_date'] = $trade['createdAt'];
                             $realizedGains[$positions[$market]['exit_date']] = $positions[$market];
 
@@ -173,7 +183,7 @@ function generatePositions($trades): array
                             $positions[$market]['size'] = $trade['size'] * $positions[$market]['direction'];
                             $positions[$market]['amount'] = $positions[$market]['size'] * $trade['price'];
                             $positions[$market]['average_entry_price'] = $trade['price'];
-                            $positions[$market]['fee'] = $trade['fee'] * -1;
+                            $positions[$market]['fee'] = 0; // fees are already on the previously closed position
                             $positions[$market]['entry_date'] = $trade['createdAt'];
                             $positions[$market]['profit'] = 0;
                             $positions[$market]['market'] = $market;
@@ -185,8 +195,10 @@ function generatePositions($trades): array
                 if ($trade['side'] == 'BUY') {
                     if ($positions[$market]['size'] + $trade['size'] == 0) {
                         // closing a short position here
+                        $amountAtAverageEntry = $trade['size'] * $positions[$market]['average_entry_price'];
                         $amountBought = $trade['size'] * $trade['price'];
-                        $positions[$market]['profit'] = $positions[$market]['amount'] + $amountBought;
+                        $profit = $amountAtAverageEntry - $amountBought;
+                        $positions[$market]['profit'] += $profit;
                         $positions[$market]['exit_date'] = $trade['createdAt'];
                         $realizedGains[$positions[$market]['exit_date']] = $positions[$market];
                         unset($positions[$market]);
@@ -195,7 +207,7 @@ function generatePositions($trades): array
                             // partial profit taking
                             $amountAtAverageEntry = $trade['size'] * $positions[$market]['average_entry_price'];
                             $amountBought = $trade['size'] * $trade['price'];
-                            $profit = $amountBought - $amountAtAverageEntry;
+                            $profit = $amountAtAverageEntry - $amountBought;
                             $positions[$market]['profit'] += $profit;
                             $positions[$market]['size'] += $trade['size'];
                             $positions[$market]['amount'] += $amountBought;
@@ -203,8 +215,10 @@ function generatePositions($trades): array
                             // flipping short into a long trade
 
                             // close the existing short position
+                            $amountAtAverageEntry = abs($positions[$market]['size']) * $positions[$market]['average_entry_price'];
                             $amountBoughtToCloseShort = abs($positions[$market]['size']) * $trade['price'];
-                            $positions[$market]['profit'] = $positions[$market]['amount'] + $amountBoughtToCloseShort;
+                            $profit = $amountAtAverageEntry - $amountBoughtToCloseShort;
+                            $positions[$market]['profit'] += $profit;
                             $positions[$market]['exit_date'] = $trade['createdAt'];
                             $realizedGains[$positions[$market]['exit_date']] = $positions[$market];
 
@@ -215,7 +229,7 @@ function generatePositions($trades): array
                             $positions[$market]['size'] = $trade['size'] * $positions[$market]['direction'];
                             $positions[$market]['amount'] = $positions[$market]['size'] * $trade['price'];
                             $positions[$market]['average_entry_price'] = $trade['price'];
-                            $positions[$market]['fee'] = $trade['fee'] * -1;
+                            $positions[$market]['fee'] = 0; // fees are already on the previously closed position
                             $positions[$market]['entry_date'] = $trade['createdAt'];
                             $positions[$market]['profit'] = 0;
                             $positions[$market]['market'] = $market;
@@ -246,8 +260,11 @@ function generatePositions($trades): array
             $profits[$date]['amount'] = floatval($trade['profit']);
             $profits[$date]['currency'] = 'USDC';
             $profits[$date]['label'] = 'realized gain';
+            $profits[$date]['transactionHash'] = '';
+            $profits[$date]['description'] = $trade['market'] . ' ' . ($trade['direction'] == 1 ? 'Long' : 'Short');
         } else {
             $profits[$date]['amount'] += floatval($trade['profit']);
+            $profits[$date]['description'] .= '; ' . $trade['market'] . ' ' . ($trade['direction'] == 1 ? 'Long' : 'Short');
         }
 
         if (!isset($fees[$date])) {
@@ -255,16 +272,21 @@ function generatePositions($trades): array
             $fees[$date]['amount'] = floatval($trade['fee']);
             $fees[$date]['currency'] = 'USDC';
             $fees[$date]['label'] = 'cost';
+            $fees[$date]['transactionHash'] = '';
+            $fees[$date]['description'] = $trade['market'] . ' ' . ($trade['direction'] == 1 ? 'Long' : 'Short');
         } else {
             $fees[$date]['amount'] += floatval($trade['fee']);
+            $fees[$date]['description'] .= '; ' . $trade['market'] . ' ' . ($trade['direction'] == 1 ? 'Long' : 'Short');
         }
     }
 
     $gains = array();
     foreach ($profits as $profit) {
+        $profit['amount'] = round($profit['amount'], 4);
         $gains[] = $profit;
     }
     foreach ($fees as $fee) {
+        $fee['amount'] = round($fee['amount'], 4);
         $gains[] = $fee;
     }
 
@@ -282,7 +304,9 @@ function generateTransfers($transfers): array
             'date' => $date,
             'amount' => $amount,
             'currency' => 'USDC',
-            'label' => ''
+            'label' => '',
+            'transactionHash' => $transfer['transactionHash'],
+            'description' => $transfer['type'],
         );
     }
 
