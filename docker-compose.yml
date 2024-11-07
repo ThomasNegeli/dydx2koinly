@@ -1,6 +1,4 @@
-version: '3'
 services:
-
 
     # we define the volumes centralized so we can reuse them in different services
     appvolumes:
