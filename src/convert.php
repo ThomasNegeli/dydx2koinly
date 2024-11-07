@@ -126,6 +126,7 @@ function generateTrades($trades): array
     $trades = array_reverse($trades);
     $fees = array();
     foreach ($trades as $tradeIndex => $trade) {
+        $newPosition = array();
         $trade['size'] = floatval($trade['size']);
         $trade['price'] = floatval($trade['price']);
         $trade['fee'] = floatval($trade['fee']);
@@ -148,7 +149,7 @@ function generateTrades($trades): array
                 $fees[$date]['description'] .= '; ' . $trade['market'] . ' ' . ($trade['direction'] == 1 ? 'Long' : 'Short') . ' - Trade Fee';
             }
         }
-
+        unset($trade['fee']);
 
         $market = $trade['market'];
         $amountTraded = $trade['size'] * $trade['price'] * $trade['direction'];
@@ -172,14 +173,27 @@ function generateTrades($trades): array
                     $positions[$market]['entry_price_average'] = $positions[$market]['amount'] / $positions[$market]['size'];
                 } else {
                     // sell trade in a long position to reduce or close position
-                    if($positions[$market]['size'] - $trade['size'] < 0) {
+                    if ($positions[$market]['size'] - $trade['size'] < 0) {
                         // long trade reversal
-                        $x = 1;
-                    }
-                    else {
-                        $profit = $positions[$market]['entry_price_average'] * $trade['size'] + $amountTraded;
+                        $newPosition = $trade;
+                        $newPosition['size'] = $positions[$market]['size'] - $trade['size'];
+                        $newPosition['entry_price_average'] = $newPosition['entry_price_initial'] = $trade['price'];
+                        $newPosition['amount'] = $newPosition['size'] * $newPosition['entry_price_average'];
+                        $newPosition['entry_date'] = $trade['createdAt'];
+                        $newPosition['profit'] = 0.0;
+                        $newPosition['trades'][] = $trade;
+
+                        $trade['size'] = abs($positions[$market]['size']);
+                        $amountTraded = $trade['size'] * $trade['price'] * $trade['direction'];
+                        $profit = -1 * ($positions[$market]['entry_price_average'] * $trade['size'] + $amountTraded);
                         $positions[$market]['profit'] += $profit;
-                        $positions[$market]['amount'] += $amountTraded - $profit;
+                        $positions[$market]['amount'] += $amountTraded + $profit;
+                        $positions[$market]['size'] -= $trade['size'];
+                        $positions[$market]['exit_date'] = $trade['createdAt'];
+                    } else {
+                        $profit = -1 * ($positions[$market]['entry_price_average'] * $trade['size'] + $amountTraded);
+                        $positions[$market]['profit'] += $profit;
+                        $positions[$market]['amount'] += $amountTraded + $profit;
                         $positions[$market]['size'] -= $trade['size'];
                         $positions[$market]['exit_date'] = $trade['createdAt'];
                     }
@@ -188,11 +202,25 @@ function generateTrades($trades): array
                 // we trade a short position
                 if ($trade['direction'] > 0) {
                     // buy trade in short position to reduce or close position
-                    if($positions[$market]['size'] + $trade['size'] > 0) {
+                    if ($positions[$market]['size'] + $trade['size'] > 0) {
                         // short trade reversal
-                        $x = 1;
-                    }
-                    else {
+                        $newPosition = $trade;
+                        $newPosition['size'] = $positions[$market]['size'] + $trade['size'];
+                        $newPosition['entry_price_average'] = $newPosition['entry_price_initial'] = $trade['price'];
+                        $newPosition['amount'] = $newPosition['size'] * $newPosition['entry_price_average'];
+                        $newPosition['entry_date'] = $trade['createdAt'];
+                        $newPosition['profit'] = 0.0;
+                        $newPosition['trades'][] = $trade;
+
+                        $trade['size'] = abs($positions[$market]['size']);
+                        $amountTraded = $trade['size'] * $trade['price'] * $trade['direction'];
+                        $profit = $positions[$market]['entry_price_average'] * $trade['size'] - $amountTraded;
+                        $positions[$market]['profit'] += $profit;
+                        $positions[$market]['amount'] += $amountTraded + $profit;
+                        $positions[$market]['size'] += $trade['size'];
+                        $positions[$market]['exit_date'] = $trade['createdAt'];
+                    } else {
+                        // reduce position size
                         $profit = $positions[$market]['entry_price_average'] * $trade['size'] - $amountTraded;
                         $positions[$market]['profit'] += $profit;
                         $positions[$market]['amount'] += $amountTraded + $profit;
@@ -213,7 +241,11 @@ function generateTrades($trades): array
         if (isset($positions[$market]) && $positions[$market]['size'] == 0) {
             // we closed the position
             $realizedGains[$positions[$market]['exit_date']] = $positions[$market];
-            unset($positions[$market]);
+            if (count($newPosition) > 0) {
+                $positions[$market] = $newPosition;
+            } else {
+                unset($positions[$market]);
+            }
         }
     }
 
