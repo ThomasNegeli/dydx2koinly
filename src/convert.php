@@ -7,12 +7,30 @@ use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Output\OutputInterface;
 use Symfony\Component\Console\SingleCommandApplication;
 
+const TRANSACTION_TEMPLATE = array(
+    'date' => "Date",
+    'sent_amount' => "Sent Amount",
+    'sent_currency' => "Sent Currency",
+    'received_amount' => "Received Amount",
+    'received_currency' => "Received Currency",
+    'fee_amount' => "Fee Amount",
+    'fee_currency' => "Fee Currency",
+    'net_worth_amount' => "Net Worth Amount",
+    'net_worth_currency' => "Net Worth Currency",
+    'label' => "Label",
+    'description' => "Description",
+    'txhash' => "TxHash"
+);
+
+const REALIZED_GAIN_LABEL = 'realized gain';
+
 (new SingleCommandApplication())
     ->setName('My Super Command') // Optional
     ->setVersion('1.0.0') // Optional
     ->addArgument('trades', InputArgument::REQUIRED, 'The dYdX trades export file!')
     ->addArgument('funding', InputArgument::REQUIRED, 'The dYdX funding export file!')
     ->addArgument('transfers', InputArgument::REQUIRED, 'The dYdX transfers export file!')
+    ->addArgument('verbose', InputArgument::OPTIONAL, "Export all trades and PNL values", false)
     ->setCode(function (InputInterface $input, OutputInterface $output): int {
 
 
@@ -20,17 +38,19 @@ use Symfony\Component\Console\SingleCommandApplication;
         $trades = read($trades, $output);
 
         $funding = $input->getArgument('funding');
-        $funding = read($funding, $output);
+        $fundings = read($funding, $output);
 
         $transfers = $input->getArgument('transfers');
         $transfers = read($transfers, $output);
 
-        $trades = generateTrades($trades);
-        $funding = generateFunding($funding);
+        $verbose = $input->getArgument('verbose') != false;
+
+        $transactions = generateTransactions($trades, $output, $verbose);
+        $fundings = generateFundings($fundings);
         $transfers = generateTransfers($transfers);
 
-        write('./output/trades.csv', $trades);
-        write('./output/funding.csv', $funding);
+        writeTransactions('./output/transactions.csv', $transactions);
+        writeTransactions('./output/funding.csv', $fundings);
         write('./output/transfers.csv', $transfers);
 
         $output->writeln('<info>Conversion completed</info>');
@@ -53,6 +73,17 @@ function write($file, $positions)
     fputcsv($fp, $headings);
     foreach ($positions as $position) {
         fputcsv($fp, $position);
+    }
+    fclose($fp);
+}
+
+function writeTransactions($file, $transactions)
+{
+    $fp = @fopen($file, "w");
+    $headings = TRANSACTION_TEMPLATE;
+    fputcsv($fp, $headings);
+    foreach ($transactions as $transaction) {
+        fputcsv($fp, $transaction);
     }
     fclose($fp);
 }
@@ -87,201 +118,422 @@ function read($file, $output): array
     return $lines;
 }
 
-function generateFunding($funding): array
+function generateFundings($fundings): array
 {
     $payments = array();
-    $funding = array_reverse($funding);
-    foreach ($funding as $paymentIndex => $payment) {
-        $date = date_create($payment['effectiveAt']);
+    $fundings = array_reverse($fundings);
+    foreach ($fundings as $funding) {
+
+        $funding['payment'] = floatval($funding['payment']);
+
+        $payment = TRANSACTION_TEMPLATE;
+        $payment['payment'] = 0.0;
+        $payment['description'] = "Daily funding payment";
+        $payment['fee_amount'] = 0.0;
+        $payment['fee_currency'] = 'USDC';
+        $payment['label'] = REALIZED_GAIN_LABEL;
+        $payment['net_worth_amount'] = '';
+        $payment['net_worth_currency'] = '';
+        $payment['received_amount'] = 0;
+        $payment['sent_amount'] = 0;
+        $payment['received_currency'] = $payment['sent_currency'] = 'USDC';
+        $payment['txhash'] = '';
+
+        $date = date_create($funding['effectiveAt']);
         $date->setTime(23, 59, 59);
-        //$date = $date->format('Y-m-t H:i:s');
-        $date = $date->format('Y-m-d H:i:s');
 
-        $payment = -1 * floatval($payment['rate']) * floatval($payment['positionSize']) * floatval($payment['price']);
-        if (!isset($payments[$date])) {
-            $payments[$date]['date'] = $date;
-            $payments[$date]['amount'] = $payment;
-            $payments[$date]['currency'] = 'USDC';
-        } else {
-            $payments[$date]['amount'] += $payment;
+        $payment['date'] = $date->format('Y-m-d H:i:s');
+        if (!isset($payments[$payment['date']])) {
+            $payments[$payment['date']] = $payment;
         }
-        $payments[$date]['label'] = 'margin fee';
-        $payments[$date]['transactionHash'] = '';
-        $payments[$date]['description'] = 'Daily funding payment';
+        $payments[$payment['date']]['payment'] += $funding['payment'];
 
-        if ($payments[$date]['amount'] > 0) {
-            $payments[$date]['label'] = 'fee refund';
-        }
     }
 
-    return $payments;
+    $realPayments = array();
+    foreach ($payments as $index => $payment) {
+        if ($payment['payment'] > 0) {
+            $payment['received_amount'] = $payment['payment'];
+        } else {
+            $payment['sent_amount'] = abs($payment['payment']);
+        }
+        unset($payment['payment']);
+        $realPayments[$index] = $payment;
+    }
+    return $realPayments;
 }
 
 // https://docs.google.com/spreadsheets/d/1jdc52yJ1swpODLTfPaCpFYzsUQ692HwFjje0-IE5fGw/edit#gid=375453467
 
-function generateTrades($trades): array
+function generateTransactions(array $trades, OutputInterface $output, bool $verbose = false): array
 {
-    $realizedGains = array();
-    $positions = array();
     $trades = array_reverse($trades);
-    $fees = array();
-    foreach ($trades as $tradeIndex => $trade) {
-        $newPosition = array();
-        $trade['size'] = floatval($trade['size']);
-        $trade['price'] = floatval($trade['price']);
+    $transactions = array();
+    $positions = array();
+
+    //$trades = array_splice($trades, 0, 100);
+
+    foreach ($trades as $trade) {
+
+        if (!isset($positions[$trade['market']])) {
+            $positions[$trade['market']] = _generateFreshPosition($trade);
+            $output->writeln("<info>Starting a new position</info>");
+        } else {
+            $positions[$trade['market']]['amount'] = round($positions[$trade['market']]['amount'], 10);
+            $positions[$trade['market']]['fee'] = round($positions[$trade['market']]['fee'], 10);
+            $positions[$trade['market']]['profit'] = round($positions[$trade['market']]['profit'], 10);
+            $positions[$trade['market']]['size'] = round($positions[$trade['market']]['size'], 10);
+        }
+
+        $output->writeln("<info>Processing trade: " . print_r($trade, true) . "</info>");
+
         $trade['fee'] = floatval($trade['fee']);
-        $date = date_create($trade['createdAt'])->format('Y-m-d H:i:s');
-        $trade['createdAt'] = $date;
-        $trade['direction'] = $trade['side'] == 'BUY' ? 1 : -1;
-        unset($trade['type']);
-        unset($trade['liquidity']);
+        $positions[$trade['market']]['fee'] += $trade['fee'];
+        $trade['fee'] = "Fee was moved to position!";
 
-        if (isset($trade['fee']) and $trade['fee'] != 0) {
-            if (!isset($fees[$date])) {
-                $fees[$date]['date'] = $date;
-                $fees[$date]['amount'] = floatval($trade['fee']);
-                $fees[$date]['currency'] = 'USDC';
-                $fees[$date]['label'] = 'cost';
-                $fees[$date]['transactionHash'] = '';
-                $fees[$date]['description'] = $trade['market'] . ' ' . ($trade['direction'] == 1 ? 'Long' : 'Short') . ' - Trade Fee';
-            } else {
-                $fees[$date]['amount'] += floatval($trade['fee']);
-                $fees[$date]['description'] .= '; ' . $trade['market'] . ' ' . ($trade['direction'] == 1 ? 'Long' : 'Short') . ' - Trade Fee';
-            }
-        }
-        unset($trade['fee']);
+        $date = date_create($trade['createdAt']);
+        $trade['createdAt'] = $date->format('Y-m-d H:i:s');
+        $trade['price'] = floatval($trade['price']);
+        $trade['size'] = floatval($trade['size']);
+        $trade['market_symbol'] = explode("-", $trade['market'])[0];
+        $trade['market_quote'] = explode("-", $trade['market'])[1];
 
-        $market = $trade['market'];
-        $amountTraded = $trade['size'] * $trade['price'] * $trade['direction'];
-        if (!isset($positions[$market])) {
-            $positions[$market] = $trade;
-            $positions[$market]['size'] = $trade['size'] * $trade['direction'];
-            $positions[$market]['amount'] = $amountTraded;
-            $positions[$market]['entry_price_average'] = $positions[$market]['entry_price_initial'] = $trade['price'];
-            $positions[$market]['entry_date'] = $trade['createdAt'];
-            $positions[$market]['profit'] = 0.0;
-            $positions[$market]['market'] = $market;
-            $positions[$market]['trades'][] = $trade;
-        } else {
-            $positions[$market]['trades'][] = $trade;
-            if ($positions[$market]['direction'] > 0) {
-                // we trade a long position
-                if ($trade['direction'] > 0) {
-                    // buy trade in a long position to increase position size
-                    $positions[$market]['amount'] += $amountTraded;
-                    $positions[$market]['size'] += $trade['size'];
-                    $positions[$market]['entry_price_average'] = $positions[$market]['amount'] / $positions[$market]['size'];
-                } else {
-                    // sell trade in a long position to reduce or close position
-                    if ($positions[$market]['size'] - $trade['size'] < 0) {
-                        // long trade reversal
-                        $newPosition = $trade;
-                        $newPosition['size'] = $positions[$market]['size'] - $trade['size'];
-                        $newPosition['entry_price_average'] = $newPosition['entry_price_initial'] = $trade['price'];
-                        $newPosition['amount'] = $newPosition['size'] * $newPosition['entry_price_average'];
-                        $newPosition['entry_date'] = $trade['createdAt'];
-                        $newPosition['profit'] = 0.0;
-                        $newPosition['trades'][] = $trade;
+        if ($trade['side'] == 'BUY') {
 
-                        $trade['size'] = abs($positions[$market]['size']);
-                        $amountTraded = $trade['size'] * $trade['price'] * $trade['direction'];
-                        $profit = -1 * ($positions[$market]['entry_price_average'] * $trade['size'] + $amountTraded);
-                        $positions[$market]['profit'] += $profit;
-                        $positions[$market]['amount'] += $amountTraded + $profit;
-                        $positions[$market]['size'] -= $trade['size'];
-                        $positions[$market]['exit_date'] = $trade['createdAt'];
-                    } else {
-                        $profit = -1 * ($positions[$market]['entry_price_average'] * $trade['size'] + $amountTraded);
-                        $positions[$market]['profit'] += $profit;
-                        $positions[$market]['amount'] += $amountTraded + $profit;
-                        $positions[$market]['size'] -= $trade['size'];
-                        $positions[$market]['exit_date'] = $trade['createdAt'];
+            if ($positions[$trade['market']]['direction'] == -1) {
+                // buy trade in an existing short position
+
+                $reversalTrade = array();
+                if ($trade['size'] > abs($positions[$trade['market']]['size'])) {
+                    // short reversal
+                    $reversalTrade = $trade;
+                    // we faket the trade to close the current short position
+                    $trade['size'] = abs($positions[$trade['market']]['size']);
+                    $dealCloseDate = clone $date;
+                    $trade['createdAt'] = $dealCloseDate->sub(DateInterval::createFromDateString('1 second'))->format('Y-m-d H:i:s');
+                    // we trade the rest of the size in the long direction
+                    $reversalTrade['size'] -= $trade['size'];
+                }
+
+                $transaction = _generateBuyTransaction($trade);
+                $transactions[] = $transaction;
+
+                $positions[$trade['market']]['amount'] -= $trade['size'] * $trade['price'];
+                $positions[$trade['market']]['trades'][] = $transaction;
+                $positions[$trade['market']]['size'] += $trade['size'];
+
+                $positions[$trade['market']]['size'] = round($positions[$trade['market']]['size'], 10);
+                if ($positions[$trade['market']]['size'] == 0) {
+
+                    $repayTransactions = _generateRepayTransactions($positions[$trade['market']]['borrowTransactions'], clone $date);
+                    foreach ($repayTransactions as $repayTransaction) {
+                        $transactions[] = $repayTransaction;
+                    }
+                    $positions[$trade['market']]['borrowTransactions'] = array();
+
+                    $positions[$trade['market']]['profit'] = $positions[$trade['market']]['amount'];
+                    if ($positions[$trade['market']]['profit'] != 0) {
+
+                        $pnlTransactions = _generatePnlTransactions($positions[$trade['market']], clone $date);
+                        foreach ($pnlTransactions as $pnlTransaction) {
+                            $transactions[] = $pnlTransaction;
+                        }
+
+                        unset($positions[$trade['market']]);
                     }
                 }
-            } else {
-                // we trade a short position
-                if ($trade['direction'] > 0) {
-                    // buy trade in short position to reduce or close position
-                    if ($positions[$market]['size'] + $trade['size'] > 0) {
-                        // short trade reversal
-                        $newPosition = $trade;
-                        $newPosition['size'] = $positions[$market]['size'] + $trade['size'];
-                        $newPosition['entry_price_average'] = $newPosition['entry_price_initial'] = $trade['price'];
-                        $newPosition['amount'] = $newPosition['size'] * $newPosition['entry_price_average'];
-                        $newPosition['entry_date'] = $trade['createdAt'];
-                        $newPosition['profit'] = 0.0;
-                        $newPosition['trades'][] = $trade;
 
-                        $trade['size'] = abs($positions[$market]['size']);
-                        $amountTraded = $trade['size'] * $trade['price'] * $trade['direction'];
-                        $profit = $positions[$market]['entry_price_average'] * $trade['size'] - $amountTraded;
-                        $positions[$market]['profit'] += $profit;
-                        $positions[$market]['amount'] += $amountTraded + $profit;
-                        $positions[$market]['size'] += $trade['size'];
-                        $positions[$market]['exit_date'] = $trade['createdAt'];
-                    } else {
-                        // reduce position size
-                        $profit = $positions[$market]['entry_price_average'] * $trade['size'] - $amountTraded;
-                        $positions[$market]['profit'] += $profit;
-                        $positions[$market]['amount'] += $amountTraded + $profit;
-                        $positions[$market]['size'] += $trade['size'];
-                        $positions[$market]['exit_date'] = $trade['createdAt'];
+                if (count($reversalTrade) > 0) {
+                    $trade = $reversalTrade;
+                    $reversalTrade = array();
+                    _buyTradeInAFreshOrExistingLongPosition($trade, $date, $positions, $transactions);
+                }
+
+            } else {
+                _buyTradeInAFreshOrExistingLongPosition($trade, $date, $positions, $transactions);
+            }
+        } else {
+
+            // sell trade in an existing short position
+            if ($positions[$trade['market']]['direction'] == -1) {
+                _sellTradeInAFreshOrExistingShortPosition($trade, $positions, $date, $transactions);
+
+            } else {
+                // sell trade in a fresh or existing long position
+
+                if ($trade['size'] > $positions[$trade['market']]['size']) {
+                    // long reversal
+                    $reversalTrade = $trade;
+                    // we faket the trade to close the current long position
+                    $trade['size'] = abs($positions[$trade['market']]['size']);
+                    $dealCloseDate = clone $date;
+                    $trade['createdAt'] = $dealCloseDate->sub(DateInterval::createFromDateString('1 second'))->format('Y-m-d H:i:s');
+                    // we trade the rest of the size in the short direction
+                    $reversalTrade['size'] -= $trade['size'];
+                }
+
+                _sellTradeInAFreshOrExistingLongPosition($trade, $positions, $transactions);
+
+                if ($positions[$trade['market']]['size'] == 0) {
+
+                    $repayTransactions = _generateRepayTransactions($positions[$trade['market']]['borrowTransactions'], clone $date);
+                    foreach ($repayTransactions as $repayTransaction) {
+                        $transactions[] = $repayTransaction;
                     }
-                } else {
-                    // sell trade in short position to increase position size
-                    $positions[$market]['amount'] += $amountTraded;
-                    $positions[$market]['size'] -= $trade['size'];
-                    $positions[$market]['entry_price_average'] = $positions[$market]['amount'] / $positions[$market]['size'];
+                    $positions[$trade['market']]['borrowTransactions'] = array();
+
+                    $positions[$trade['market']]['profit'] = $positions[$trade['market']]['amount'];
+                    if ($positions[$trade['market']]['profit'] != 0) {
+
+                        $pnlTransactions = _generatePnlTransactions($positions[$trade['market']], clone $date);
+                        foreach ($pnlTransactions as $pnlTransaction) {
+                            $transactions[] = $pnlTransaction;
+                        }
+
+                        unset($positions[$trade['market']]);
+                    }
+                }
+
+                if (count($reversalTrade) > 0) {
+                    $trade = $reversalTrade;
+                    $reversalTrade = array();
+                    _sellTradeInAFreshOrExistingShortPosition($trade, $positions, $date, $transactions);
                 }
             }
-            $positions[$market]['amount'] = round($positions[$market]['amount'], 10); // in some cases the amount of a trade gets too small, so we cap it at 10 digits
-            $positions[$market]['size'] = round($positions[$market]['size'], 10); // in some cases the size of a trade gets too small, so we cap it at 10 digits
         }
 
-        if (isset($positions[$market]) && $positions[$market]['size'] == 0) {
-            // we closed the position
-            $realizedGains[$positions[$market]['exit_date']] = $positions[$market];
-            if (count($newPosition) > 0) {
-                $positions[$market] = $newPosition;
-            } else {
-                unset($positions[$market]);
-            }
-        }
     }
 
-    $profits = array();
-    $fees = array();
-    foreach ($realizedGains as $tradeDate => $trade) {
+    if (!$verbose) {
+        $transactions = _filterAllNonPnlTransactions($transactions);
+    }
 
-        $date = date_create($tradeDate);
-        //$date->setTime(23, 59, 59);
-        //$date = $date->format('Y-m-t');
-        $date = $date->format('Y-m-d H:i:s');
+    return $transactions;
+}
 
-        if (!isset($profits[$date])) {
-            $profits[$date]['date'] = $date;
-            $profits[$date]['amount'] = floatval($trade['profit']);
-            $profits[$date]['currency'] = 'USDC';
-            $profits[$date]['label'] = 'realized gain';
-            $profits[$date]['transactionHash'] = '';
-            $profits[$date]['description'] = $trade['market'] . ' ' . ($trade['direction'] == 1 ? 'Long' : 'Short');
-        } else {
-            $profits[$date]['amount'] += floatval($trade['profit']);
-            $profits[$date]['description'] .= '; ' . $trade['market'] . ' ' . ($trade['direction'] == 1 ? 'Long' : 'Short');
+function _filterAllNonPnlTransactions(array $originalTransactions): array
+{
+
+    $transactions = array();
+
+    foreach ($originalTransactions as $originalTransaction) {
+        if ($originalTransaction['label'] == REALIZED_GAIN_LABEL) {
+            $transactions[] = $originalTransaction;
         }
     }
 
-    $gains = array();
-    foreach ($profits as $profit) {
-        $profit['amount'] = round($profit['amount'], 4);
-        $gains[] = $profit;
-    }
-    foreach ($fees as $fee) {
-        $fee['amount'] = round($fee['amount'], 4);
-        $gains[] = $fee;
+    return $transactions;
+}
+
+function _generatePnlTransactions(array $position, DateTime $pnlTransactionDate): array
+{
+    $transactions = array();
+    $pnlTransaction = TRANSACTION_TEMPLATE;
+
+    $pnlTransaction['description'] = "";
+    $profit = $position['profit'];
+    if ($position['fee'] > 0) {
+        $profit -= $position['fee'];
+        $pnlTransaction['description'] = "Position fee of " . $position['fee'] . " USDC - ";
     }
 
-    return $gains;
+    $pnlTransaction['date'] = $pnlTransactionDate->add(DateInterval::createFromDateString('1 second'))->format('Y-m-d H:i:s');
+    $pnlTransaction['sent_amount'] = $profit < 0 ? abs($profit) : 0;
+    $pnlTransaction['sent_currency'] = 'USDC';
+    $pnlTransaction['received_amount'] = $profit > 0 ? abs($profit) : 0;;
+    $pnlTransaction['received_currency'] = 'USDC';
+    $pnlTransaction['fee_amount'] = 0;
+    $pnlTransaction['fee_currency'] = 'USDC';
+    $pnlTransaction['net_worth_amount'] = '';
+    $pnlTransaction['net_worth_currency'] = '';
+    $pnlTransaction['label'] = REALIZED_GAIN_LABEL;
+    $pnlTransaction['description'] .= "Realized PNL of " . $position['profit'] . " USDC";
+    $pnlTransaction['txhash'] = '';
+    $transactions[] = $pnlTransaction;
+
+    if ($profit > 0) {
+        $quoteCleanTransaction = $pnlTransaction;
+        $quoteCleanTransaction['sent_amount'] = $pnlTransaction['received_amount'];
+        $quoteCleanTransaction['received_amount'] = 0;
+        $quoteCleanTransaction['label'] = 'Margin repayment';
+        $quoteCleanTransaction['description'] = "Clean quote currency by PNL";
+        $transactions[] = $quoteCleanTransaction;
+    } else {
+        $quoteCleanTransaction = $pnlTransaction;
+        $quoteCleanTransaction['sent_amount'] = 0;
+        $quoteCleanTransaction['received_amount'] = $pnlTransaction['sent_amount'];
+        $quoteCleanTransaction['label'] = 'Margin loan';
+        $quoteCleanTransaction['description'] = "Clean quote currency by PNL";
+        $transactions[] = $quoteCleanTransaction;
+    }
+
+    return $transactions;
+}
+
+/**
+ * @param array $trade
+ * @param DateTime $borrowDate
+ * @param bool $inQuoteCurrency
+ * @return string[]
+ */
+function _generateBorrowTransaction(array $trade, DateTime $borrowDate, bool $inQuoteCurrency = false): array
+{
+    $borrowTransaction = TRANSACTION_TEMPLATE;
+    $borrowTransaction['date'] = $borrowDate->sub(DateInterval::createFromDateString('1 second'))->format('Y-m-d H:i:s');
+    $borrowTransaction['sent_amount'] = '';
+    $borrowTransaction['sent_currency'] = '';
+    $borrowTransaction['received_amount'] = $inQuoteCurrency ? $trade['size'] * $trade['price'] : $trade['size'];
+    $borrowTransaction['received_currency'] = $inQuoteCurrency ? 'USDC' : $trade['market_symbol'];
+    $borrowTransaction['fee_amount'] = 0.0;
+    $borrowTransaction['fee_currency'] = 'USDC';
+    $borrowTransaction['net_worth_amount'] = '';
+    $borrowTransaction['net_worth_currency'] = '';
+    $borrowTransaction['label'] = 'Margin loan';
+    $borrowTransaction['description'] = 'Borrow ' . $trade['size'] . ' ' . $trade['market_symbol'];
+    if ($inQuoteCurrency) {
+        $borrowTransaction['description'] = 'Borrow ' . $trade['size'] * $trade['price'] . ' USDC';
+    }
+    $borrowTransaction['txhash'] = '';
+
+    return $borrowTransaction;
+}
+
+function _generateSellTransaction(array $trade): array
+{
+    $sellTransaction = array();
+
+    $sellTransaction['date'] = $trade['createdAt'];
+    $sellTransaction['sent_amount'] = $trade['size'];
+    $sellTransaction['sent_currency'] = $trade['market_symbol'];
+    $sellTransaction['received_amount'] = $trade['size'] * $trade['price'];
+    $sellTransaction['received_currency'] = 'USDC';
+    $sellTransaction['fee_amount'] = 0.0;   // fee is already moved to position
+    $sellTransaction['fee_currency'] = 'USDC';
+    $sellTransaction['net_worth_amount'] = '';
+    $sellTransaction['net_worth_currency'] = '';
+    $sellTransaction['label'] = '';
+    $sellTransaction['description'] = 'Sell ' . $trade['size'] . ' ' . $trade['market_symbol'];
+    $sellTransaction['txhash'] = '';
+
+    return $sellTransaction;
+}
+
+/**
+ * @param array $trade
+ * @return array
+ */
+function _generateBuyTransaction(array $trade)
+{
+
+    $buyTransaction = array();
+
+    $buyTransaction['date'] = $trade['createdAt'];
+    $buyTransaction['sent_amount'] = $trade['size'] * $trade['price'];
+    $buyTransaction['sent_currency'] = 'USDC';
+    $buyTransaction['received_amount'] = $trade['size'];
+    $buyTransaction['received_currency'] = $trade['market_symbol'];
+    $buyTransaction['fee_amount'] = 0.0;    // fee is already moved to position
+    $buyTransaction['fee_currency'] = 'USDC';
+    $buyTransaction['net_worth_amount'] = '';
+    $buyTransaction['net_worth_currency'] = '';
+    $buyTransaction['label'] = '';
+    $buyTransaction['description'] = 'Buy ' . $trade['size'] . ' ' . $trade['market_symbol'];
+    $buyTransaction['txhash'] = '';
+
+    return $buyTransaction;
+}
+
+function _generateFreshPosition($trade): array
+{
+    $position = array();
+    $position['size'] = 0.0;
+    $position['profit'] = 0.0;
+    $position['amount'] = 0.0;
+    $position['restart'] = true;
+    $position['fee'] = 0.0;
+    $position['direction'] = $trade['side'] == 'BUY' ? 1 : -1;
+    return $position;
+}
+
+function _sellTradeInAFreshOrExistingShortPosition($trade, &$positions, $date, &$transactions): void
+{
+    if (!isset($positions[$trade['market']])) {
+        $positions[$trade['market']] = _generateFreshPosition($trade);
+    }
+
+    // check if we have to borrow the amount first
+    if ($positions[$trade['market']]['size'] < $trade['size']) {
+        $borrowTransaction = _generateBorrowTransaction($trade, clone $date);
+        $transactions[] = $borrowTransaction;
+
+        $positions[$trade['market']]['size'] -= $trade['size'];
+        $positions[$trade['market']]['restart'] = false;
+        $positions[$trade['market']]['borrowTransactions'][] = $borrowTransaction;
+    }
+    $transaction = _generateSellTransaction($trade);
+    $transactions[] = $transaction;
+
+    $positions[$trade['market']]['amount'] += $transaction['received_amount'];
+    $positions[$trade['market']]['trades'][] = $transaction;
+}
+
+function _sellTradeInAFreshOrExistingLongPosition($trade, &$positions, &$transactions): void
+{
+    if (!isset($positions[$trade['market']])) {
+        $positions[$trade['market']] = _generateFreshPosition($trade);
+    }
+
+    $transaction = _generateSellTransaction($trade);
+    $transactions[] = $transaction;
+
+    $positions[$trade['market']]['amount'] += $trade['size'] * $trade['price'];
+    $positions[$trade['market']]['trades'][] = $transaction;
+    $positions[$trade['market']]['size'] -= $trade['size'];
+
+    $positions[$trade['market']]['size'] = round($positions[$trade['market']]['size'], 10);
+}
+
+function _buyTradeInAFreshOrExistingLongPosition($trade, $date, &$positions, &$transactions): void
+{
+    if (!isset($positions[$trade['market']])) {
+        $positions[$trade['market']] = _generateFreshPosition($trade);
+    }
+    // buy trade in a fresh or existing long position
+    $borrowTransaction = _generateBorrowTransaction($trade, clone $date, true);
+    $transactions[] = $borrowTransaction;
+
+    $positions[$trade['market']]['size'] += $trade['size'];
+    $positions[$trade['market']]['restart'] = false;
+    $positions[$trade['market']]['borrowTransactions'][] = $borrowTransaction;
+
+    $transaction = _generateBuyTransaction($trade);
+    $transactions[] = $transaction;
+
+    $positions[$trade['market']]['amount'] -= $transaction['sent_amount'];
+    $positions[$trade['market']]['trades'][] = $transaction;
+
+}
+
+/**
+ * @param array $position
+ * @param DateTime $repayDate
+ * @return array
+ */
+function _generateRepayTransactions(array $borrowTransactions, DateTime $repayDate): array
+{
+    $transactions = array();
+    foreach ($borrowTransactions as $borrowTransaction) {
+        $repayTransaction = $borrowTransaction;
+        $repayTransaction['label'] = 'Margin repayment';
+        $repayTransaction['sent_amount'] = $repayTransaction['received_amount'];
+        $repayTransaction['sent_currency'] = $repayTransaction['received_currency'];
+        $repayTransaction['received_amount'] = "";
+        $repayTransaction['received_currency'] = "";
+        $repayTransaction['description'] = "Repay " . $repayTransaction['sent_amount'] . ' ' . $repayTransaction['sent_currency'];
+        $repayTransaction['date'] = $repayDate->add(DateInterval::createFromDateString('1 second'))->format('Y-m-d H:i:s');
+        $transactions[] = $repayTransaction;
+    }
+    return $transactions;
 }
 
 function generateTransfers($transfers): array
