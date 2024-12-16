@@ -28,8 +28,8 @@ const REALIZED_GAIN_LABEL = 'realized gain';
     ->setName('My Super Command') // Optional
     ->setVersion('1.0.0') // Optional
     ->addArgument('trades', InputArgument::REQUIRED, 'The dYdX trades export file!')
-    ->addArgument('funding', InputArgument::REQUIRED, 'The dYdX funding export file!')
     ->addArgument('transfers', InputArgument::REQUIRED, 'The dYdX transfers export file!')
+    ->addArgument('funding', InputArgument::OPTIONAL, 'The dYdX funding export file!', false)
     ->addArgument('verbose', InputArgument::OPTIONAL, "Export all trades and PNL values", false)
     ->setCode(function (InputInterface $input, OutputInterface $output): int {
 
@@ -38,7 +38,10 @@ const REALIZED_GAIN_LABEL = 'realized gain';
         $trades = read($trades, $output);
 
         $funding = $input->getArgument('funding');
-        $fundings = read($funding, $output);
+        $fundings = array();
+        if ($funding) {
+            $fundings = read($funding, $output);
+        }
 
         $transfers = $input->getArgument('transfers');
         $transfers = read($transfers, $output);
@@ -99,6 +102,7 @@ function read($file, $output): array
             $buffer = trim($buffer, "\r\n");
             if ($row == 0) {
                 $header = str_getcsv($buffer);
+                $header[0] = 'Time';
             } else {
                 $columns = str_getcsv($buffer);
                 $data = array();
@@ -163,16 +167,42 @@ function generateFundings($fundings): array
     return $realPayments;
 }
 
-// https://docs.google.com/spreadsheets/d/1jdc52yJ1swpODLTfPaCpFYzsUQ692HwFjje0-IE5fGw/edit#gid=375453467
+function _mapV4Trades(array $originalTrades): array
+{
+    $tradeTimesLocked = array();
+    $trades = array();
+    foreach ($originalTrades as $originalTrade) {
+        $trade = array();
+        $format = "m/j/y, H:i a";
+        $createdAt = DateTime::createFromFormat($format, $originalTrade['Time']);
+        $trade['createdAt'] = $createdAt->format('c');
+        while (isset($tradeTimesLocked[$trade['createdAt']])) {
+            $createdAt->add(DateInterval::createFromDateString('1 second'));
+            $trade['createdAt'] = $createdAt->format('c');
+        }
+        $tradeTimesLocked[$trade['createdAt']] = $trade['createdAt'];
+        $trade['market'] = $originalTrade['Market'];
+        $trade['side'] = strtoupper($originalTrade['Side']);
+        $trade['size'] = floatval($originalTrade['Amount']);
+        $trade['price'] = floatval(str_replace(',', '', trim($originalTrade['Price'], '$')));
+        $trade['total'] = $trade['size'] * $trade['price'];
+        $trade['fee'] = floatval(str_replace(',', '', trim($originalTrade['Fee'], '$')));
+        $trade['type'] = $originalTrade['Type'];
+        $trade['liquidity'] = $originalTrade['Liquidity'];
+        $trades[] = $trade;
+    }
+
+    return $trades;
+}
 
 function generateTransactions(array $trades, OutputInterface $output, bool $verbose = false): array
 {
     $trades = array_reverse($trades);
+
+    $trades = _mapV4Trades($trades);
+
     $transactions = array();
     $positions = array();
-
-    //$trades = array_splice($trades, 0, 100);
-
     foreach ($trades as $trade) {
 
         if (!isset($positions[$trade['market']])) {
@@ -261,6 +291,7 @@ function generateTransactions(array $trades, OutputInterface $output, bool $verb
             } else {
                 // sell trade in a fresh or existing long position
 
+                $reversalTrade = array();
                 if ($trade['size'] > $positions[$trade['market']]['size']) {
                     // long reversal
                     $reversalTrade = $trade;
@@ -522,7 +553,9 @@ function _buyTradeInAFreshOrExistingLongPosition($trade, $date, &$positions, &$t
 function _generateRepayTransactions(array $borrowTransactions, DateTime $repayDate): array
 {
     $transactions = array();
-    foreach ($borrowTransactions as $borrowTransaction) {
+
+    $borrowTransaction = array_shift($borrowTransactions);
+    if ($borrowTransaction) {
         $repayTransaction = $borrowTransaction;
         $repayTransaction['label'] = 'Margin repayment';
         $repayTransaction['sent_amount'] = $repayTransaction['received_amount'];
@@ -531,8 +564,14 @@ function _generateRepayTransactions(array $borrowTransactions, DateTime $repayDa
         $repayTransaction['received_currency'] = "";
         $repayTransaction['description'] = "Repay " . $repayTransaction['sent_amount'] . ' ' . $repayTransaction['sent_currency'];
         $repayTransaction['date'] = $repayDate->add(DateInterval::createFromDateString('1 second'))->format('Y-m-d H:i:s');
+
+        foreach ($borrowTransactions as $borrowTransaction) {
+            $repayTransaction['sent_amount'] += $borrowTransaction['received_amount'];
+            $repayTransaction['description'] = "Repay " . $repayTransaction['sent_amount'] . ' ' . $repayTransaction['sent_currency'];
+        }
         $transactions[] = $repayTransaction;
     }
+
     return $transactions;
 }
 
@@ -540,6 +579,7 @@ function generateTransfers($transfers): array
 {
     $positions = array();
     $transfers = array_reverse($transfers);
+    $transfers = _mapV4Transfers($transfers);
     foreach ($transfers as $transfer) {
         $date = $transfer['createdAt'];
         $amount = $transfer['type'] == 'DEPOSIT' ? floatval($transfer['creditAmount']) : -1 * floatval($transfer['creditAmount']);
@@ -554,4 +594,39 @@ function generateTransfers($transfers): array
     }
 
     return $positions;
+}
+
+const TRANSFER_TEMPLATE = array(
+    'date',
+    'amount',
+    'currency',
+    'label',
+    'transactionHash',
+    'descriptions'
+);
+
+function _mapV4Transfers($originalTransfers): array
+{
+    $transfers = array();
+
+    $transferTimesLocked = array();
+    foreach ($originalTransfers as $originalTransfer) {
+        $transfer = array();
+        $format = "m/j/y, H:i a";
+        $createdAt = DateTime::createFromFormat($format, $originalTransfer['Time']);
+        $transfer['createdAt'] = $createdAt->format('c');
+        while (isset($transferTimesLocked[$transfer['createdAt']])) {
+            $createdAt->add(DateInterval::createFromDateString('1 second'));
+            $transfer['createdAt'] = $createdAt->format('c');
+        }
+        $transferTimesLocked[$transfer['createdAt']] = $transfer['createdAt'];
+        $transfer['type'] = $originalTransfer['Action'];
+        $transfer['fromAddress'] = $originalTransfer['Sender'];
+        $transfer['toAddress'] = $originalTransfer['Recipient'];
+        $transfer['creditAmount'] = floatval(trim($originalTransfer['Amount'], '$'));
+        $transfer['transactionHash'] = $originalTransfer['Transaction'];
+        $transfers[] = $transfer;
+    }
+
+    return $transfers;
 }
