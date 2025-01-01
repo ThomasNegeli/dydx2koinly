@@ -24,37 +24,25 @@ const TRANSACTION_TEMPLATE = array(
 
 const REALIZED_GAIN_LABEL = 'realized gain';
 
+const BASE_URL = 'https://indexer.dydx.trade/v4/';
+
 (new SingleCommandApplication())
-    ->setName('My Super Command') // Optional
-    ->setVersion('1.0.0') // Optional
-    ->addArgument('trades', InputArgument::REQUIRED, 'The dYdX trades export file!')
-    ->addArgument('transfers', InputArgument::REQUIRED, 'The dYdX transfers export file!')
-    ->addArgument('funding', InputArgument::OPTIONAL, 'The dYdX funding export file!', false)
-    ->addArgument('verbose', InputArgument::OPTIONAL, "Export all trades and PNL values", false)
+    ->setName('dYdX v4 to Koinly') // Optional
+    ->setVersion('2.0.0') // Optional
+    ->addArgument('address', InputArgument::REQUIRED, 'The dYdX address!')
     ->setCode(function (InputInterface $input, OutputInterface $output): int {
 
 
-        $trades = $input->getArgument('trades');
-        $trades = read($trades, $output);
+        $address = $input->getArgument('address');
 
-        $funding = $input->getArgument('funding');
-        $fundings = array();
-        if ($funding) {
-            $fundings = read($funding, $output);
-        }
-
-        $transfers = $input->getArgument('transfers');
-        $transfers = read($transfers, $output);
-
-        $verbose = $input->getArgument('verbose') != false;
-
-        $transactions = generateTransactions($trades, $output, $verbose);
-        $fundings = generateFundings($fundings);
-        $transfers = generateTransfers($transfers);
+        $transactions = generateTransactions($address, $output);
+        $fees = generateFeeTransactions($address, $output);
+        $rewards = array();
+        //$rewards = generateRewards($address);
 
         writeTransactions('./output/transactions.csv', $transactions);
-        writeTransactions('./output/funding.csv', $fundings);
-        write('./output/transfers.csv', $transfers);
+        writeTransactions('./output/fees.csv', $fees);
+        writeTransactions('./output/rewards.csv', $rewards);
 
         $output->writeln('<info>Conversion completed</info>');
 
@@ -195,148 +183,75 @@ function _mapV4Trades(array $originalTrades): array
     return $trades;
 }
 
-function generateTransactions(array $trades, OutputInterface $output, bool $verbose = false): array
+function generateFeeTransactions(string $address, OutputInterface $output, bool $verbose = false): array
 {
-    $trades = array_reverse($trades);
-
-    $trades = _mapV4Trades($trades);
 
     $transactions = array();
-    $positions = array();
-    foreach ($trades as $trade) {
 
-        if (!isset($positions[$trade['market']])) {
-            $positions[$trade['market']] = _generateFreshPosition($trade);
-            $output->writeln("<info>Starting a new position</info>");
-        } else {
-            $positions[$trade['market']]['amount'] = round($positions[$trade['market']]['amount'], 10);
-            $positions[$trade['market']]['fee'] = round($positions[$trade['market']]['fee'], 10);
-            $positions[$trade['market']]['profit'] = round($positions[$trade['market']]['profit'], 10);
-            $positions[$trade['market']]['size'] = round($positions[$trade['market']]['size'], 10);
+    $limit = 100;
+    $page = 1;
+    while ($fills = _getFills($address, $limit, $page)) {
+        foreach ($fills as $fill) {
+            $output->writeln("<info>Processing fill: " . print_r($fill, true) . "</info>");
+
+            $pnlTransaction = TRANSACTION_TEMPLATE;
+
+            $pnlTransaction['date'] = date_create($fill['createdAt'])->format('Y-m-d H:i:s');
+
+            $pnlTransaction['sent_amount'] = $fill['fee'];
+            $pnlTransaction['sent_currency'] = 'USDC';
+            $pnlTransaction['received_amount'] = 0;;
+            $pnlTransaction['received_currency'] = 'USDC';
+
+            $pnlTransaction['description'] = "Trade fee to " . $fill['side'] . " " . $fill['size'] . " " . $fill['market'];
+
+            $pnlTransaction['fee_amount'] = 0;
+            $pnlTransaction['fee_currency'] = 'USDC';
+            $pnlTransaction['net_worth_amount'] = '';
+            $pnlTransaction['net_worth_currency'] = '';
+            $pnlTransaction['label'] = REALIZED_GAIN_LABEL;
+            $pnlTransaction['txhash'] = $fill['createdAtHeight'] . "-" . hash('sha256', $pnlTransaction['date']);
+            $transactions[] = $pnlTransaction;
         }
-
-        $output->writeln("<info>Processing trade: " . print_r($trade, true) . "</info>");
-
-        $trade['fee'] = floatval($trade['fee']);
-        $positions[$trade['market']]['fee'] += $trade['fee'];
-        $trade['fee'] = "Fee was moved to position!";
-
-        $date = date_create($trade['createdAt']);
-        $trade['createdAt'] = $date->format('Y-m-d H:i:s');
-        $trade['price'] = floatval($trade['price']);
-        $trade['size'] = floatval($trade['size']);
-        $trade['market_symbol'] = explode("-", $trade['market'])[0];
-        $trade['market_quote'] = explode("-", $trade['market'])[1];
-
-        if ($trade['side'] == 'BUY') {
-
-            if ($positions[$trade['market']]['direction'] == -1) {
-                // buy trade in an existing short position
-
-                $reversalTrade = array();
-                if ($trade['size'] > abs($positions[$trade['market']]['size'])) {
-                    // short reversal
-                    $reversalTrade = $trade;
-                    // we faket the trade to close the current short position
-                    $trade['size'] = abs($positions[$trade['market']]['size']);
-                    $dealCloseDate = clone $date;
-                    $trade['createdAt'] = $dealCloseDate->sub(DateInterval::createFromDateString('1 second'))->format('Y-m-d H:i:s');
-                    // we trade the rest of the size in the long direction
-                    $reversalTrade['size'] -= $trade['size'];
-                }
-
-                $transaction = _generateBuyTransaction($trade);
-                $transactions[] = $transaction;
-
-                $positions[$trade['market']]['amount'] -= $trade['size'] * $trade['price'];
-                $positions[$trade['market']]['trades'][] = $transaction;
-                $positions[$trade['market']]['size'] += $trade['size'];
-
-                $positions[$trade['market']]['size'] = round($positions[$trade['market']]['size'], 10);
-                if ($positions[$trade['market']]['size'] == 0) {
-
-                    $repayTransactions = _generateRepayTransactions($positions[$trade['market']]['borrowTransactions'], clone $date);
-                    foreach ($repayTransactions as $repayTransaction) {
-                        $transactions[] = $repayTransaction;
-                    }
-                    $positions[$trade['market']]['borrowTransactions'] = array();
-
-                    $positions[$trade['market']]['profit'] = $positions[$trade['market']]['amount'];
-                    if ($positions[$trade['market']]['profit'] != 0) {
-
-                        $pnlTransactions = _generatePnlTransactions($positions[$trade['market']], clone $date);
-                        foreach ($pnlTransactions as $pnlTransaction) {
-                            $transactions[] = $pnlTransaction;
-                        }
-
-                        unset($positions[$trade['market']]);
-                    }
-                }
-
-                if (count($reversalTrade) > 0) {
-                    $trade = $reversalTrade;
-                    $reversalTrade = array();
-                    _buyTradeInAFreshOrExistingLongPosition($trade, $date, $positions, $transactions);
-                }
-
-            } else {
-                _buyTradeInAFreshOrExistingLongPosition($trade, $date, $positions, $transactions);
-            }
-        } else {
-
-            // sell trade in an existing short position
-            if ($positions[$trade['market']]['direction'] == -1) {
-                _sellTradeInAFreshOrExistingShortPosition($trade, $positions, $date, $transactions);
-
-            } else {
-                // sell trade in a fresh or existing long position
-
-                $reversalTrade = array();
-                if ($trade['size'] > $positions[$trade['market']]['size']) {
-                    // long reversal
-                    $reversalTrade = $trade;
-                    // we faket the trade to close the current long position
-                    $trade['size'] = abs($positions[$trade['market']]['size']);
-                    $dealCloseDate = clone $date;
-                    $trade['createdAt'] = $dealCloseDate->sub(DateInterval::createFromDateString('1 second'))->format('Y-m-d H:i:s');
-                    // we trade the rest of the size in the short direction
-                    $reversalTrade['size'] -= $trade['size'];
-                }
-
-                _sellTradeInAFreshOrExistingLongPosition($trade, $positions, $transactions);
-
-                if ($positions[$trade['market']]['size'] == 0) {
-
-                    $repayTransactions = _generateRepayTransactions($positions[$trade['market']]['borrowTransactions'], clone $date);
-                    foreach ($repayTransactions as $repayTransaction) {
-                        $transactions[] = $repayTransaction;
-                    }
-                    $positions[$trade['market']]['borrowTransactions'] = array();
-
-                    $positions[$trade['market']]['profit'] = $positions[$trade['market']]['amount'];
-                    if ($positions[$trade['market']]['profit'] != 0) {
-
-                        $pnlTransactions = _generatePnlTransactions($positions[$trade['market']], clone $date);
-                        foreach ($pnlTransactions as $pnlTransaction) {
-                            $transactions[] = $pnlTransaction;
-                        }
-
-                        unset($positions[$trade['market']]);
-                    }
-                }
-
-                if (count($reversalTrade) > 0) {
-                    $trade = $reversalTrade;
-                    $reversalTrade = array();
-                    _sellTradeInAFreshOrExistingShortPosition($trade, $positions, $date, $transactions);
-                }
-            }
-        }
-
+        $page++;
     }
 
-    if (!$verbose) {
-        $transactions = _filterAllNonPnlTransactions($transactions);
+    return $transactions;
+
+}
+
+function generateTransactions(string $address, OutputInterface $output, bool $verbose = false): array
+{
+    $transactions = array();
+
+    $positions = _getPerpetualPositions($address);
+    foreach ($positions as $position) {
+
+        $output->writeln("<info>Processing position: " . print_r($position, true) . "</info>");
+
+        $pnlTransaction = TRANSACTION_TEMPLATE;
+
+        $pnlTransaction['date'] = date_create($position['closedAt'])->format('Y-m-d H:i:s');
+        $pnl = $position['realizedPnl'];
+        $funding = $position['netFunding'];
+        $profit = $pnl + $funding;
+
+        $pnlTransaction['sent_amount'] = $profit < 0 ? abs($profit) : 0;
+        $pnlTransaction['sent_currency'] = 'USDC';
+        $pnlTransaction['received_amount'] = $profit > 0 ? abs($profit) : 0;;
+        $pnlTransaction['received_currency'] = 'USDC';
+
+        $pnlTransaction['description'] = $position['sumClose'] . " " . $position['market'];
+        $pnlTransaction['description'] .= " - PNL " . $pnl . " USDC";
+        $pnlTransaction['description'] .= " - Funding " . $funding . " USDC";
+
+        $pnlTransaction['fee_amount'] = 0;
+        $pnlTransaction['fee_currency'] = 'USDC';
+        $pnlTransaction['net_worth_amount'] = '';
+        $pnlTransaction['net_worth_currency'] = '';
+        $pnlTransaction['label'] = REALIZED_GAIN_LABEL;
+        $pnlTransaction['txhash'] = $position['createdAtHeight'] . "-" . hash('sha256', $pnlTransaction['date']);
+        $transactions[] = $pnlTransaction;
     }
 
     return $transactions;
@@ -575,7 +490,7 @@ function _generateRepayTransactions(array $borrowTransactions, DateTime $repayDa
     return $transactions;
 }
 
-function generateTransfers($transfers): array
+function generateTransfers(string $address, OutputInterface $output): array
 {
     $positions = array();
     $transfers = array_reverse($transfers);
@@ -594,6 +509,104 @@ function generateTransfers($transfers): array
     }
 
     return $positions;
+}
+
+/**
+ * Hier sind die Einzeltransaktionen die für die Positionsberechnung verwendet werden muss.
+ * TODO
+ *
+ * @param string $address
+ * @param int $limit
+ * @param int $page
+ * @param float $subaccountNumber
+ * @return array|null
+ * @throws \Symfony\Contracts\HttpClient\Exception\ClientExceptionInterface
+ * @throws \Symfony\Contracts\HttpClient\Exception\DecodingExceptionInterface
+ * @throws \Symfony\Contracts\HttpClient\Exception\RedirectionExceptionInterface
+ * @throws \Symfony\Contracts\HttpClient\Exception\ServerExceptionInterface
+ * @throws \Symfony\Contracts\HttpClient\Exception\TransportExceptionInterface
+ */
+function _getFills(string $address, int $limit = 1, int $page = 1, float $subaccountNumber = 0): ?array
+{
+    /** @var \Symfony\Contracts\HttpClient\HttpClientInterface $client */
+    $client = \Symfony\Component\HttpClient\HttpClient::create();
+    $url = BASE_URL . 'fills';
+    $response = $client->request(
+        'GET',
+        $url,
+        [
+            'query' => [
+                'address' => $address,
+                'subaccountNumber' => $subaccountNumber,
+                'limit' => $limit,
+                'page' => $page,
+            ]
+        ]
+    );
+
+    $statusCode = $response->getStatusCode();
+    // $statusCode = 200
+    $contentType = $response->getHeaders()['content-type'][0];
+    // $contentType = 'application/json'
+    $content = $response->getContent();
+    // $content = '{"id":521583, "name":"symfony-docs", ...}'
+    $content = $response->toArray();
+    // $content = ['id' => 521583, 'name' => 'symfony-docs', ...]
+
+    if (isset($content['fills']) && count($content['fills']) > 0) {
+        return $content['fills'];
+    }
+
+    return null;
+}
+
+/**
+ * Funding kann von hier geholt werden.
+ * Die Positions berechnen leider PNL falsch. Also stimmt die Summe nicht.
+ * Z.b. am 7.11.24, wo wir laut den Positions einen Profit von 1188 USDC Profit gehabt hätten!!!
+ * TODO
+ *
+ * @param string $address
+ * @param int $subaccountNumber
+ * @param string $status
+ * @return array
+ * @throws \Symfony\Contracts\HttpClient\Exception\ClientExceptionInterface
+ * @throws \Symfony\Contracts\HttpClient\Exception\DecodingExceptionInterface
+ * @throws \Symfony\Contracts\HttpClient\Exception\RedirectionExceptionInterface
+ * @throws \Symfony\Contracts\HttpClient\Exception\ServerExceptionInterface
+ * @throws \Symfony\Contracts\HttpClient\Exception\TransportExceptionInterface
+ */
+function _getPerpetualPositions(string $address, float $subaccountNumber = 0, string $status = 'CLOSED'): array
+{
+    /** @var \Symfony\Contracts\HttpClient\HttpClientInterface $client */
+    $client = \Symfony\Component\HttpClient\HttpClient::create();
+    $url = BASE_URL . 'perpetualPositions';
+    $response = $client->request(
+        'GET',
+        $url,
+        [
+            'query' => [
+                'address' => $address,
+                'subaccountNumber' => $subaccountNumber,
+                'status' => $status,
+            ]
+        ]
+    );
+
+    $statusCode = $response->getStatusCode();
+    // $statusCode = 200
+    $contentType = $response->getHeaders()['content-type'][0];
+    // $contentType = 'application/json'
+    $content = $response->getContent();
+    // $content = '{"id":521583, "name":"symfony-docs", ...}'
+    $content = $response->toArray();
+    // $content = ['id' => 521583, 'name' => 'symfony-docs', ...]
+
+    if (isset($content['positions'])) {
+        return $content['positions'];
+    }
+
+    return array();
 }
 
 const TRANSFER_TEMPLATE = array(
