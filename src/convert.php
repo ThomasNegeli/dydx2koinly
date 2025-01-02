@@ -75,12 +75,20 @@ function generateRewards(string $address, OutputInterface $output, bool $verbose
 
             $rewardTransaction = TRANSACTION_TEMPLATE;
 
-            $rewardTransaction['date'] = date_create($reward['createdAt'])->format('Y-m-d H:i:s');
+            $date = date_create($reward['createdAt']);
+            $date = $date->setTime(23, 59, 59)->format('Y-m-d H:i:s');
+            $rewardTransaction['date'] = $date;
+            if (isset($transactions[$date])) {
+                $rewardTransaction = $transactions[$date];
+            } else {
+                $rewardTransaction['received_amount'] = 0;
+                $rewardTransaction['txhash'] = "";
+            }
 
             $amount = $reward['tradingReward'];
-            $rewardTransaction['sent_amount'] = $amount < 0 ? abs($amount) : 0;
+            $rewardTransaction['sent_amount'] = 0;
             $rewardTransaction['sent_currency'] = 'DYDX';
-            $rewardTransaction['received_amount'] = $amount > 0 ? abs($amount) : 0;;;
+            $rewardTransaction['received_amount'] += abs($amount);
             $rewardTransaction['received_currency'] = 'DYDX';
 
             $rewardTransaction['description'] = "Trading reward received";
@@ -90,8 +98,8 @@ function generateRewards(string $address, OutputInterface $output, bool $verbose
             $rewardTransaction['net_worth_amount'] = '';
             $rewardTransaction['net_worth_currency'] = '';
             $rewardTransaction['label'] = REWARD_LABEL;
-            $rewardTransaction['txhash'] = $reward['createdAtHeight'] . "-" . hash('sha256', $rewardTransaction['date']);
-            $transactions[] = $rewardTransaction;
+            $rewardTransaction['txhash'] .= $reward['createdAtHeight'] . " - ";
+            $transactions[$date] = $rewardTransaction;
         }
     }
 
