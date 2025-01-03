@@ -361,6 +361,7 @@ function _getHistoricalPnl(string $address, OutputInterface $output, float $suba
                     'subaccountNumber' => $subaccountNumber,
                     'limit' => $limit,
                     'page' => $page,
+                    'createdBeforeOrAt' => $createdBeforeOrAt,
                 ]
             ]
         );
@@ -412,16 +413,26 @@ function _getPerpetualPositions(string $address, float $subaccountNumber = 0, st
     return null;
 }
 
-function _getHistoricalBlockTradingRewards(string $address): ?array
+function _getHistoricalBlockTradingRewards(string $address, bool $excludeCurrentDay = true): ?array
 {
     /** @var \Symfony\Contracts\HttpClient\HttpClientInterface $client */
     $client = \Symfony\Component\HttpClient\HttpClient::create();
     $url = BASE_URL . 'historicalBlockTradingRewards/' . $address;
+
+    $format = "Y-m-d\TH:i:s.999\Z";
+    $createdBeforeOrAt = date_create();
+    $createdBeforeOrAt->setTime(23, 59, 59);
+    if ($excludeCurrentDay) {
+        $createdBeforeOrAt->sub(DateInterval::createFromDateString('24 hours'));
+    }
+    $createdBeforeOrAt = $createdBeforeOrAt->format($format);
+
     $response = $client->request(
         'GET',
         $url,
         [
             'query' => [
+                'startingBeforeOrAt' => $createdBeforeOrAt
             ]
         ]
     );
