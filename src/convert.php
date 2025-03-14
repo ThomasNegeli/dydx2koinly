@@ -69,36 +69,28 @@ function generateRewards(string $address, OutputInterface $output, bool $verbose
 {
     $transactions = array();
 
-    if ($rewards = _getHistoricalBlockTradingRewards($address)) {
+    if ($rewards = _getHistoricalBlockTradingRewardAggregations($address)) {
         foreach ($rewards as $reward) {
             $output->writeln("<info>Processing reward: " . print_r($reward, true) . "</info>");
 
             $rewardTransaction = TRANSACTION_TEMPLATE;
 
-            $date = date_create($reward['createdAt']);
+            $date = date_create($reward['startedAt']);
             $date = $date->setTime(23, 59, 59)->format('Y-m-d H:i:s');
-            $rewardTransaction['date'] = $date;
-            if (isset($transactions[$date])) {
-                $rewardTransaction = $transactions[$date];
-            } else {
-                $rewardTransaction['received_amount'] = 0;
-                $rewardTransaction['txhash'] = "";
-            }
 
+            $rewardTransaction['date'] = $date;
             $amount = $reward['tradingReward'];
             $rewardTransaction['sent_amount'] = 0;
             $rewardTransaction['sent_currency'] = 'DYDX';
-            $rewardTransaction['received_amount'] += abs($amount);
+            $rewardTransaction['received_amount'] = abs($amount);
             $rewardTransaction['received_currency'] = 'DYDX';
-
             $rewardTransaction['description'] = "Trading reward received";
-
             $rewardTransaction['fee_amount'] = 0;
             $rewardTransaction['fee_currency'] = 'USDC';
             $rewardTransaction['net_worth_amount'] = '';
             $rewardTransaction['net_worth_currency'] = '';
             $rewardTransaction['label'] = REWARD_LABEL;
-            $rewardTransaction['txhash'] .= $reward['createdAtHeight'] . " - ";
+            $rewardTransaction['txhash'] = "BlockHeight: ".$reward['endedAtHeight'];
             $transactions[$date] = $rewardTransaction;
         }
     }
@@ -413,6 +405,19 @@ function _getPerpetualPositions(string $address, float $subaccountNumber = 0, st
     return null;
 }
 
+/**
+ * retrieve all rewards as single transactions
+ *
+ * @param string $address
+ * @param bool $excludeCurrentDay
+ * @return array|null
+ * @throws DateInvalidOperationException
+ * @throws \Symfony\Contracts\HttpClient\Exception\ClientExceptionInterface
+ * @throws \Symfony\Contracts\HttpClient\Exception\DecodingExceptionInterface
+ * @throws \Symfony\Contracts\HttpClient\Exception\RedirectionExceptionInterface
+ * @throws \Symfony\Contracts\HttpClient\Exception\ServerExceptionInterface
+ * @throws \Symfony\Contracts\HttpClient\Exception\TransportExceptionInterface
+ */
 function _getHistoricalBlockTradingRewards(string $address, bool $excludeCurrentDay = true): ?array
 {
     /** @var \Symfony\Contracts\HttpClient\HttpClientInterface $client */
@@ -432,6 +437,53 @@ function _getHistoricalBlockTradingRewards(string $address, bool $excludeCurrent
         $url,
         [
             'query' => [
+                'startingBeforeOrAt' => $createdBeforeOrAt
+            ]
+        ]
+    );
+
+    $content = $response->toArray();
+
+    if (isset($content['rewards'])) {
+        return $content['rewards'];
+    }
+
+    return null;
+}
+
+/**
+ * retrieve all rewards in a daily aggregated version
+ *
+ * @param string $address
+ * @param bool $excludeCurrentDay
+ * @return array|null
+ * @throws DateInvalidOperationException
+ * @throws \Symfony\Contracts\HttpClient\Exception\ClientExceptionInterface
+ * @throws \Symfony\Contracts\HttpClient\Exception\DecodingExceptionInterface
+ * @throws \Symfony\Contracts\HttpClient\Exception\RedirectionExceptionInterface
+ * @throws \Symfony\Contracts\HttpClient\Exception\ServerExceptionInterface
+ * @throws \Symfony\Contracts\HttpClient\Exception\TransportExceptionInterface
+ */
+function _getHistoricalBlockTradingRewardAggregations(string $address, bool $excludeCurrentDay = true): ?array
+{
+    /** @var \Symfony\Contracts\HttpClient\HttpClientInterface $client */
+    $client = \Symfony\Component\HttpClient\HttpClient::create();
+    $url = BASE_URL . 'historicalTradingRewardAggregations/' . $address;
+
+    $format = "Y-m-d\TH:i:s.999\Z";
+    $createdBeforeOrAt = date_create();
+    $createdBeforeOrAt->setTime(23, 59, 59);
+    if ($excludeCurrentDay) {
+        $createdBeforeOrAt->sub(DateInterval::createFromDateString('24 hours'));
+    }
+    $createdBeforeOrAt = $createdBeforeOrAt->format($format);
+
+    $response = $client->request(
+        'GET',
+        $url,
+        [
+            'query' => [
+                'period' => 'DAILY',
                 'startingBeforeOrAt' => $createdBeforeOrAt
             ]
         ]
